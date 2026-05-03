@@ -1,0 +1,55 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  background: #0a0a0a;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(212, 175, 55, 0.18);
+  border-radius: 8px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(212, 175, 55, 0.4);
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@layer components {
+  .glass {
+    @apply bg-white/[0.03] backdrop-blur-xl border border-white/[0.06];
+  }
+  .glass-strong {
+    @apply bg-white/[0.05] backdrop-blur-2xl border border-white/[0.08];
+  }
+  .gold-border {
+    @apply border border-gold-500/30;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl
+           text-sm font-medium transition-all duration-200 select-none cursor-pointer
+           whitespace-nowrap shrink-0;
+  }
+  .btn-primary {
+    @apply btn bg-gold-500/15 text-gold-200 border border-gold-500/40
+           hover:bg-gold-500/25 hover:shadow-gold hover:border-gold-400/60
+           active:scale-[0.98];
+  }
+  .btn-ghost {
+    @apply btn bg-white/[0.04] text-zinc-200 border border-white/[0.08]
+           hover:bg-white/[0.08] hover:border-white/20;
+  }
+}

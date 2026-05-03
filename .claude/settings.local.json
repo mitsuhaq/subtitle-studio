@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install *)",
+      "Bash(uv sync *)",
+      "Bash(uv run --no-project --python 3.12 --with pillow python -c ' *)",
+      "Bash(npx --yes @tauri-apps/cli icon icon-source.png)",
+      "Bash(export PATH=\"/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH\")",
+      "Bash(cargo check *)",
+      "Read(//private/tmp/**)",
+      "Bash(pkill -f \"tauri dev\")",
+      "Bash(pkill -x \"Subtitle Studio\")",
+      "Bash(pkill -f \"subtitle-studio\")",
+      "Bash(pkill -f \"vite\")",
+      "Bash(cargo fetch *)",
+      "Bash(npx tsc *)",
+      "Bash(curl -fsSL --max-time 10 \"https://evermeet.cx/ffmpeg/info/ffmpeg/release\")",
+      "Bash(curl -fsSI --max-time 10 -L \"https://huggingface.co/Systran/faster-whisper-large-v3/resolve/main/config.json\")",
+      "Bash(curl -fsSI --max-time 10 -L \"https://huggingface.co/Systran/faster-whisper-large-v3/resolve/main/model.bin\")",
+      "Bash(uv run *)",
+      "Bash(npx tauri *)",
+      "Bash(killall Dock)",
+      "Bash(open \"/Volumes/Crucial X9/Subtitle/src-tauri/target/debug/bundle/macos/Subtitle Studio.app\")",
+      "Bash(kill 46416 46502 46620 46575 46396 46290 46272)",
+      "Bash(python-sidecar/.venv/bin/python -c \"import worker.main; print\\('python ok'\\)\")",
+      "Bash(python-sidecar/.venv/bin/python -c \"from worker.whisper_engine import _performance_core_count; import os; print\\(f'p-cores={_performance_core_count\\(\\)}  total={os.cpu_count\\(\\)}'\\)\")",
+      "Bash(sysctl -n hw.perflevel0.physicalcpu hw.perflevel1.physicalcpu hw.physicalcpu hw.logicalcpu)",
+      "Bash(kill -9 47713)",
+      "Bash(grep -n \"^      </div>\\\\|^    </div>\\\\|^  \\);\\\\|^}$\" \"/Volumes/Crucial X9/Subtitle/src/tabs/StyleTab.tsx\")",
+      "Bash(grep -n \"allFinished\\\\|Готово \\\\${doneCount}\" \"/Volumes/Crucial X9/Subtitle/src/tabs/QueueTab.tsx\")",
+      "Bash(chmod +x \"/Volumes/Crucial X9/Subtitle/scripts/release.sh\")"
+    ]
+  }
+}
