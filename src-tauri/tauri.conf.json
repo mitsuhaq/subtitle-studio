@@ -46,6 +46,7 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "externalBin": ["binaries/worker"],
     "macOS": {
       "minimumSystemVersion": "11.0"
     },

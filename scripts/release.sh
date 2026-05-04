@@ -28,7 +28,6 @@ case "$TRIPLE" in
 esac
 BIN_NAME="worker-${TRIPLE}${EXE_SUFFIX}"
 BIN_PATH="src-tauri/binaries/${BIN_NAME}"
-OVERRIDE="src-tauri/tauri.release.conf.json"
 
 cd "$ROOT"
 
@@ -53,18 +52,10 @@ if [[ ! -x "$BIN_PATH" ]]; then
   exit 1
 fi
 
-# --- 2. Override config -----------------------------------------------------
-echo "→ Writing release override → $OVERRIDE"
-cat >"$OVERRIDE" <<EOF
-{
-  "\$schema": "https://schema.tauri.app/config/2",
-  "bundle": {
-    "resources": ["binaries/${BIN_NAME}"]
-  }
-}
-EOF
-
-# --- 3. Tauri build (with signing) -----------------------------------------
+# --- 2. Tauri build (with signing) -----------------------------------------
+# Sidecar binary is now picked up via `bundle.externalBin` in tauri.conf.json
+# (Tauri auto-appends `-<host-triple>(.exe)` to the configured stem). No
+# per-build override file needed anymore.
 # Pick up the key. Priority: explicit env var → default location → fail.
 DEFAULT_KEY="$HOME/.tauri/subtitle-studio.key"
 KEY_PATH="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$DEFAULT_KEY}"
@@ -85,9 +76,9 @@ export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
 echo "→ Signing with key: $KEY_PATH"
 
 echo "→ Building Tauri app…"
-npx tauri build --config "$ROOT/$OVERRIDE"
+npx tauri build
 
-# --- 4. latest.json for the in-app updater ---------------------------------
+# --- 3. latest.json for the in-app updater ---------------------------------
 APP_VERSION="$(node -p "require('./src-tauri/tauri.conf.json').version")"
 BUNDLE_DIR="src-tauri/target/release/bundle"
 

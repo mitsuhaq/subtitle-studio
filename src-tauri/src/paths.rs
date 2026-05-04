@@ -3,15 +3,23 @@ use std::path::{Path, PathBuf};
 const DATA_DIR_NAME: &str = "data";
 const SUBDIRS: &[&str] = &["models", "ffmpeg", "logs", "cache", "presets"];
 
-/// Resolve the portable `data/` directory next to the executable.
+/// App folder under platform user-data roots. Stays in sync with
+/// `productName` in `tauri.conf.json` so an upgrade never strands the old
+/// data; if you rename the product, migrate this constant in lockstep.
+const APP_DIR_NAME: &str = "Zonthor Studio";
+
+/// Resolve the user-writable `data/` directory.
 ///
-/// Production: `<dir-of-app-binary>/data/` — for true portability the
-/// binary and `data/` travel together.
-///
-/// Dev (`cargo tauri dev`): the binary lives under `src-tauri/target/...`,
-/// so we walk up looking for the project root (the one with `package.json`
-/// and `src-tauri/`) and use `<root>/data/` instead. This keeps the dev
-/// data folder out of the cargo target tree.
+/// Layout per platform:
+///   * Dev (`cargo tauri dev`): repo's `<root>/data/`. Keeps everything in
+///     the project so contributors can wipe `target/` without losing models.
+///   * macOS production: sibling of the `.app` bundle. Lets the user move
+///     the app + data folder as a pair onto an external drive.
+///   * Windows production: `%APPDATA%\Zonthor Studio\data\`. NSIS installs
+///     into `C:\Program Files\…` which is read-only for non-admin processes,
+///     so we cannot keep `data/` next to the exe.
+///   * Linux production: `$XDG_DATA_HOME/Zonthor Studio/data/` (≡
+///     `~/.local/share/Zonthor Studio/data/`).
 pub fn data_dir() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         let parent = exe.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
@@ -21,15 +29,59 @@ pub fn data_dir() -> PathBuf {
                 return root.join(DATA_DIR_NAME);
             }
         }
-        // macOS .app bundle: exe lives in <App>.app/Contents/MacOS/<exe>.
-        // Put `data/` *next to* the .app so the bundle stays untouched
-        // (code signing + updates) and the user can move both as a pair.
         if let Some(app_sibling) = macos_app_sibling(&parent) {
             return app_sibling.join(DATA_DIR_NAME);
         }
-        return parent.join(DATA_DIR_NAME);
+        // Backwards-compat: if the install dir is itself user-writable AND
+        // already has a non-empty `data/` from a previous version, keep
+        // using it so an upgrade doesn't strand whatever the user already
+        // downloaded (whisper model is ~3 GB — re-downloading would be
+        // hostile). New installs go straight to %APPDATA% (or platform
+        // equivalent) since C:\Program Files\… is read-only by default.
+        let next_to_exe = parent.join(DATA_DIR_NAME);
+        if next_to_exe.is_dir() && dir_has_any_entry(&next_to_exe) {
+            return next_to_exe;
+        }
     }
-    PathBuf::from(DATA_DIR_NAME)
+    platform_user_data_dir().join(DATA_DIR_NAME)
+}
+
+fn dir_has_any_entry(p: &Path) -> bool {
+    std::fs::read_dir(p)
+        .ok()
+        .and_then(|mut it| it.next())
+        .is_some()
+}
+
+#[cfg(windows)]
+fn platform_user_data_dir() -> PathBuf {
+    // %APPDATA% (= FOLDERID_RoamingAppData) is the canonical location for
+    // user-writable app data on Windows. Falling back to %USERPROFILE% if
+    // it ever resolves empty keeps us out of \ProgramData (system-wide,
+    // also requires admin).
+    let base = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(|p| PathBuf::from(p).join("AppData").join("Roaming")))
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join(APP_DIR_NAME)
+}
+
+#[cfg(target_os = "macos")]
+fn platform_user_data_dir() -> PathBuf {
+    // Reached only if the exe isn't inside an .app bundle (e.g. a stripped
+    // standalone binary placed somewhere ad-hoc). Mirror Apple's recommended
+    // user-data path so we still write to a stable location.
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    home.join("Library").join("Application Support").join(APP_DIR_NAME)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn platform_user_data_dir() -> PathBuf {
+    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+        return PathBuf::from(xdg).join(APP_DIR_NAME);
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    home.join(".local").join("share").join(APP_DIR_NAME)
 }
 
 /// If `exe_dir` looks like `<X>.app/Contents/MacOS`, return `<X>.app`'s parent.

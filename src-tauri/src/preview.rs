@@ -154,9 +154,10 @@ pub async fn render_styled(
         return Ok(out);
     }
 
-    // 3) Write the test ASS into a temp file with an FFmpeg-safe path.
-    //    The `subtitles=` filter parses the path itself, so spaces/colons
-    //    would otherwise break it.
+    // 3) Write the test ASS into a temp file. We pass only the basename to
+    //    the `subtitles=` filter and run ffmpeg with `current_dir` set to
+    //    that folder — avoids the Windows `C:\…` parsing trap (the filter
+    //    treats `:` as an option separator, so absolute paths blow up).
     let safe_dir = std::env::temp_dir().join("subtitle-studio-preview");
     tokio::fs::create_dir_all(&safe_dir).await.ok();
     let nonce = SystemTime::now()
@@ -168,15 +169,17 @@ pub async fn render_styled(
     tokio::fs::write(&ass_path, ass.as_bytes())
         .await
         .context("write test ass")?;
+    let ass_basename = ass_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow!("non-utf8 ass filename"))?
+        .to_string();
 
     // 4) Apply ASS to the frame.
     let tmp = cache_dir().join(format!("{STYLED_PREFIX}{key}-{nonce}.png"));
-    let ass_str = ass_path
-        .to_str()
-        .ok_or_else(|| anyhow!("non-utf8 ass path"))?
-        .to_string();
-    let filter = format!("subtitles={ass_str}");
+    let filter = format!("subtitles={ass_basename}");
     let status = tokio::process::Command::new(&ffmpeg)
+        .current_dir(&safe_dir)
         .arg("-y")
         .arg("-hide_banner")
         .arg("-loglevel")

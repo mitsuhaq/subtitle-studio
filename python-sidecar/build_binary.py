@@ -86,7 +86,7 @@ def clean() -> None:
 
 def build(triple: str) -> Path:
     name = f"worker-{triple}"
-    print(f"[build] PyInstaller → {name}")
+    print(f"[build] PyInstaller -> {name}")
     # `--collect-all faster_whisper` and friends pull every data file the
     # libraries need at runtime (CTranslate2 .so, tokenizers vocab, etc.).
     # Without these PyInstaller silently strips them and the binary crashes

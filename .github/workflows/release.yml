@@ -1,0 +1,215 @@
+name: Release
+
+# Triggered by pushing a tag that looks like a version (e.g. `v0.2.2`).
+# Also exposes a manual `workflow_dispatch` so you can re-run a build for
+# the same tag without re-tagging (useful if a CI run flaked).
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to (re)build, e.g. v0.2.2. Must already exist."
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build · ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            sidecar_ext: ""
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            sidecar_ext: ".exe"
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # workflow_dispatch passes a tag input; tag-pushes already check that ref out.
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install npm deps
+        run: npm ci
+
+      - name: Sync Python sidecar venv
+        working-directory: python-sidecar
+        run: uv sync
+
+      - name: Build Python sidecar binary (PyInstaller)
+        working-directory: python-sidecar
+        run: uv run python build_binary.py
+
+      - name: Verify sidecar artefact exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="src-tauri/binaries/worker-${{ matrix.target }}${{ matrix.sidecar_ext }}"
+          if [[ ! -f "$expected" ]]; then
+            echo "::error::Sidecar binary not found at $expected"
+            ls -la src-tauri/binaries || true
+            exit 1
+          fi
+          echo "Sidecar OK: $expected ($(du -h "$expected" | cut -f1))"
+
+      - name: Build Tauri app + create / append GitHub Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Tauri's minisign updater key. Same key for both platforms — the
+          # `pubkey` baked into tauri.conf.json verifies signatures from any
+          # platform's bundle.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: "Zonthor Studio __VERSION__"
+          releaseBody: |
+            Кросс-платформенный билд: macOS (arm64) + Windows (x64).
+
+            См. артефакты ниже. Auto-updater подхватит `latest.json` для
+            обеих платформ автоматически.
+          releaseDraft: false
+          prerelease: false
+          args: --target ${{ matrix.target }}
+
+  publish-updater-manifest:
+    name: Publish latest.json
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Resolve tag and version
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Download release assets (.sig files for updater)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p sigs
+          # tauri-action uploads:
+          #   macOS:   <App>.app.tar.gz + .sig
+          #   Windows: <App>_<ver>_x64-setup.nsis.zip + .sig  (preferred updater bundle)
+          gh release download "${{ steps.tag.outputs.tag }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "*.sig" \
+            --pattern "*.app.tar.gz" \
+            --pattern "*-setup.nsis.zip" \
+            --dir sigs
+          ls -la sigs/
+
+      - name: Build latest.json
+        id: manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import glob, json, os, re, urllib.parse
+
+          tag = os.environ["TAG"]
+          version = os.environ["VERSION"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          base = f"https://github.com/{repo}/releases/download/{tag}"
+
+          def rewrite_for_github(filename: str) -> str:
+              # GitHub silently rewrites spaces in uploaded asset names to dots.
+              return filename.replace(" ", ".")
+
+          def find_pair(asset_glob: str):
+              """Return (asset_url, sig_text) for the first matching artefact.
+              `asset_glob` is matched against local filenames in ./sigs."""
+              for path in sorted(glob.glob(f"sigs/{asset_glob}")):
+                  if path.endswith(".sig"):
+                      continue
+                  sig_path = path + ".sig"
+                  if not os.path.exists(sig_path):
+                      continue
+                  asset_name = rewrite_for_github(os.path.basename(path))
+                  url = f"{base}/{urllib.parse.quote(asset_name)}"
+                  with open(sig_path) as f:
+                      return url, f.read().strip()
+              return None
+
+          platforms = {}
+          mac = find_pair("*.app.tar.gz")
+          if mac:
+              platforms["darwin-aarch64"] = {"signature": mac[1], "url": mac[0]}
+          win = find_pair("*-setup.nsis.zip")
+          if win:
+              platforms["windows-x86_64"] = {"signature": win[1], "url": win[0]}
+
+          if not platforms:
+              raise SystemExit("No updater artefacts found in release — nothing to publish.")
+
+          import datetime
+          manifest = {
+              "version": version,
+              "notes": "См. изменения в релизе на GitHub.",
+              "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "platforms": platforms,
+          }
+          with open("latest.json", "w") as f:
+              json.dump(manifest, f, indent=2, ensure_ascii=False)
+          print("Wrote latest.json:")
+          print(json.dumps(manifest, indent=2, ensure_ascii=False))
+          PY
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          VERSION: ${{ steps.tag.outputs.version }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+
+      - name: Upload latest.json to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ steps.tag.outputs.tag }}" \
+            latest.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
