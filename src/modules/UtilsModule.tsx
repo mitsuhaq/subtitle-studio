@@ -15,7 +15,6 @@ import {
 import {
   notify,
   onUtilsProgress,
-  probeVideoDuration,
   pickImageFile,
   pickVideoFile,
   revealInShell,
@@ -75,27 +74,24 @@ export default function UtilsModule() {
   });
 
   // Probe duration of the first selected video for the trim sliders.
-  // We could not use `<video src="asset://localhost/…">` here because on
-  // Windows the absolute path contains backslashes that don't survive the
-  // asset URL roundtrip — Webview2 silently never fires `loadedmetadata`,
-  // `duration` stays `0`, and the Run button stays disabled. Going through
-  // ffmpeg in Rust is platform-neutral.
   useEffect(() => {
     if (op !== "trim" || videos.length === 0) return;
     let cancelled = false;
-    probeVideoDuration(videos[0])
-      .then((dur) => {
-        if (cancelled || !Number.isFinite(dur) || dur <= 0) return;
-        setDuration(dur);
-        setStartSec(0);
-        setEndSec(dur);
-      })
-      .catch(() => {
-        // Leave duration at 0 — the slider stays disabled, run button too,
-        // user sees there's something wrong with the source file.
-      });
+    const v = document.createElement("video");
+    v.preload = "metadata";
+    // Local file URL — Tauri allowlist already covers reading metadata via
+    // the asset protocol because we enabled it for the Style preview.
+    v.src = `asset://localhost/${encodeURI(videos[0])}`;
+    v.onloadedmetadata = () => {
+      if (cancelled || !Number.isFinite(v.duration)) return;
+      setDuration(v.duration);
+      setStartSec(0);
+      setEndSec(v.duration);
+    };
     return () => {
       cancelled = true;
+      v.removeAttribute("src");
+      v.load();
     };
   }, [op, videos]);
 

@@ -337,17 +337,9 @@ async fn burn_subtitles<R: Runtime>(
     duration: f32,
     cancel_flag: Arc<AtomicBool>,
 ) -> Result<()> {
-    // FFmpeg's `subtitles=` filter does its own arg parsing — `:` is the
-    // option separator, `\` is an escape, `[` `]` are filtergraph delimiters.
-    // On Windows a literal absolute path like `C:\Users\…\subs.ass` therefore
-    // hits the parser as `C` (filter name) + `:` (separator) + garbage.
-    //
-    // Sidestep all that by:
-    //   1. copying the ASS into a temp folder with an ASCII-only filename;
-    //   2. running ffmpeg with `current_dir` = that folder;
-    //   3. passing the bare basename to the filter (no path separators, no
-    //      drive letter).
-    // This works identically on macOS / Linux / Windows.
+    // FFmpeg's subtitles= filter parses the ASS path itself, so spaces and
+    // colons in the path break it. Copy the ASS to a sibling-of-video temp
+    // location with a safe filename and feed FFmpeg that.
     let safe_dir = std::env::temp_dir().join("subtitle-studio");
     tokio::fs::create_dir_all(&safe_dir).await?;
     let nonce = std::time::SystemTime::now()
@@ -356,11 +348,6 @@ async fn burn_subtitles<R: Runtime>(
         .unwrap_or(0);
     let safe_ass = safe_dir.join(format!("subs-{nonce}.ass"));
     tokio::fs::copy(ass, &safe_ass).await?;
-    let safe_ass_basename = safe_ass
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| anyhow!("non-utf8 temp ass filename"))?
-        .to_string();
 
     emit_stage(
         app,
@@ -368,10 +355,13 @@ async fn burn_subtitles<R: Runtime>(
         output.file_name().and_then(|s| s.to_str()),
     );
 
-    let filter = format!("subtitles={safe_ass_basename}");
+    let safe_ass_str = safe_ass
+        .to_str()
+        .ok_or_else(|| anyhow!("non-utf8 temp ass path"))?
+        .to_string();
+    let filter = format!("subtitles={safe_ass_str}");
 
     let mut child = tokio::process::Command::new(ffmpeg)
-        .current_dir(&safe_dir)
         .arg("-y")
         .arg("-hide_banner")
         .arg("-i")
@@ -440,8 +430,11 @@ async fn burn_subtitles<R: Runtime>(
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 if cancel_flag.load(Ordering::SeqCst) {
                     if let Some(pid) = pid {
+                        // Best-effort cancel; spawn a kill via std::process.
                         log::info!("ffmpeg burn-in cancel requested, killing pid {pid}");
-                        crate::proc::kill_pid(pid);
+                        let _ = std::process::Command::new("kill")
+                            .arg(pid.to_string())
+                            .status();
                     }
                     break;
                 }

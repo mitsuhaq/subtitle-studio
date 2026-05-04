@@ -10,12 +10,11 @@ data/
 src-tauri/binaries/worker-*
 python-sidecar/dist/
 python-sidecar/build/
-python-sidecar/.venv/
 python-sidecar/__pycache__/
 python-sidecar/worker/__pycache__/
 **/__pycache__/
 python-sidecar/_pyinstaller_entry.py
-python-sidecar/*.spec
+python-sidecar/worker.spec
 
 # Release-only artifacts (uploaded to GitHub Releases, not the repo)
 *.dmg
@@ -30,10 +29,6 @@ src-tauri/tauri.release.conf.json
 .DS_Store
 .vscode/
 .idea/
-.claude/scheduled_tasks.lock
-
-# Session transcripts (Claude Code dumps, not project source)
-history.txt
 
 # Local backup .app copies (snapshots kept by user, not project source)
 *.app/

@@ -181,8 +181,6 @@ export const utilConvert = (videoPath: string, options: ConvertOptions) =>
 export const utilOverlay = (videoPath: string, options: OverlayOptions) =>
   invoke<UtilResult>("util_overlay", { videoPath, options });
 export const utilsCancel = () => invoke<void>("utils_cancel");
-export const probeVideoDuration = (videoPath: string) =>
-  invoke<number>("probe_video_duration", { videoPath });
 
 export function onUtilsProgress(
   cb: (p: UtilProgress) => void,

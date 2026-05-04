@@ -306,19 +306,12 @@ def _watch_parent_and_die() -> None:
     """Self-destruct if the launching Tauri process dies.
 
     Tokio's ``kill_on_drop`` only fires on a graceful Drop — if the parent
-    crashes or is force-killed, the worker survives as an orphan and keeps
-    eating CPU forever. Two orthogonal guards:
+    crashes or is force-killed, the worker survives as an orphan adopted
+    by init (ppid=1) and keeps eating CPU forever. Two orthogonal guards:
 
     1. stdin EOF watcher — Tauri keeps the pipe open; an EOF means the
-       parent exited. Works on both POSIX and Windows.
-    2. Parent-liveness poll — platform-specific backup in case stdin
-       behaves weirdly (e.g. Tauri ever stops piping stdin).
-       * POSIX: re-init adopts orphans to PID 1, so ``os.getppid() != orig``
-         is a reliable signal.
-       * Windows: there is no init, ppid stays stale forever after the
-         parent dies. Instead we hold an ``OpenProcess`` handle to the
-         original parent and poll its signaled state — when the parent
-         exits, the handle becomes signaled.
+       parent exited.
+    2. ppid poll — backup signal in case stdin behaves weirdly.
     """
     orig_ppid = os.getppid()
 
@@ -336,71 +329,22 @@ def _watch_parent_and_die() -> None:
         except Exception:
             _exit("stdin error")
 
-    if sys.platform == "win32":
-        import ctypes
-        from ctypes import wintypes
-
-        SYNCHRONIZE = 0x00100000
-        WAIT_OBJECT_0 = 0x00000000
-        WAIT_TIMEOUT = 0x00000102
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.OpenProcess.restype = wintypes.HANDLE
-        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        kernel32.WaitForSingleObject.restype = wintypes.DWORD
-        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
-        kernel32.CloseHandle.restype = wintypes.BOOL
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-
-        parent_handle = kernel32.OpenProcess(SYNCHRONIZE, False, orig_ppid)
-
-        def _parent_watcher() -> None:
-            if not parent_handle:
-                # Couldn't even open the parent — assume it's already gone
-                # and just rely on stdin watcher; don't panic-exit here in
-                # case it's a permissions quirk.
-                log.warning("OpenProcess(parent ppid=%s) failed — fallback to stdin only", orig_ppid)
-                return
+    def _ppid_watcher() -> None:
+        while True:
+            time.sleep(2.0)
             try:
-                while True:
-                    rc = kernel32.WaitForSingleObject(parent_handle, 2000)
-                    if rc == WAIT_OBJECT_0:
-                        _exit("parent process exited (WaitForSingleObject signaled)")
-                        return
-                    if rc != WAIT_TIMEOUT:
-                        _exit(f"WaitForSingleObject error rc={rc}")
-                        return
-            finally:
-                kernel32.CloseHandle(parent_handle)
-    else:
-
-        def _parent_watcher() -> None:
-            while True:
-                time.sleep(2.0)
-                try:
-                    ppid = os.getppid()
-                except Exception:
-                    continue
-                if ppid == 1 or (orig_ppid != 1 and ppid != orig_ppid):
-                    _exit(f"ppid changed {orig_ppid}→{ppid}")
-                    return
+                ppid = os.getppid()
+            except Exception:
+                continue
+            if ppid == 1 or (orig_ppid != 1 and ppid != orig_ppid):
+                _exit(f"ppid changed {orig_ppid}→{ppid}")
+                return
 
     threading.Thread(target=_stdin_watcher, daemon=True).start()
-    threading.Thread(target=_parent_watcher, daemon=True).start()
+    threading.Thread(target=_ppid_watcher, daemon=True).start()
 
 
 def main() -> int:
-    # Force UTF-8 on stdout/stderr so unicode log records (— → ✓ etc.) don't
-    # explode on a Russian Windows console (cp1251) once we're running under
-    # the Tauri parent — pipes inherit the launcher's locale, which the
-    # parent has no clean way to override per-child.
-    if hasattr(sys.stdout, "reconfigure"):
-        try:
-            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
-
     # ``force=True`` resets root logger handlers so faster-whisper / uvicorn
     # imports that registered their own handler before us don't double up.
     logging.basicConfig(

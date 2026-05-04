@@ -50,45 +50,16 @@ fn project_root() -> Option<PathBuf> {
     }
 }
 
-/// Try to locate the bundled sidecar binary that ships with a release build.
-///
-/// `bundle.externalBin` strips the `-<triple>` suffix when staging the file
-/// into the installer (Tauri's design: by the time the bundle ships it is
-/// platform-specific anyway, so the triple becomes redundant). The binary
-/// therefore lands as plain `worker(.exe)` next to the main executable.
-///
-/// We still probe the legacy triple-suffixed name as a fallback for:
-///   * dev / portable layouts where the file was hand-staged
-///   * any old `bundle.resources`-style installation that's still around
-///
-/// Layouts checked, in order:
-///   - Windows / portable: `<exe-dir>/worker(.exe)`
-///   - macOS .app:         `<App>.app/Contents/MacOS/worker`
-///   - Legacy resources:   `<exe-dir>/binaries/worker-<triple>(.exe)` and
-///                          `<App>.app/Contents/Resources/binaries/...`
+/// Try to locate the bundled, PyInstaller-built sidecar binary that ships
+/// with a release build. We register it in `tauri.conf.json::bundle.resources`
+/// as `binaries/*`, which means:
+///   - macOS  →  `<App>.app/Contents/Resources/binaries/worker-<triple>`
+///   - Windows →  `<install-dir>/resources/binaries/worker-<triple>.exe`
+///   - Linux  →  `<install-dir>/resources/binaries/worker-<triple>`
+/// We also probe alongside the executable for portable / dev cases.
 fn bundled_sidecar() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let exe_dir = exe.parent()?.to_path_buf();
-
-    // Modern externalBin layout: `worker(.exe)` right next to the main exe.
-    for ext in ["", ".exe"] {
-        let p = exe_dir.join(format!("worker{ext}"));
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    // macOS .app: Contents/MacOS is exe_dir; sometimes externalBin writes
-    // into Contents/Resources instead — check both for safety.
-    if let Some(contents) = exe_dir.parent() {
-        for ext in ["", ".exe"] {
-            let p = contents.join("Resources").join(format!("worker{ext}"));
-            if p.exists() {
-                return Some(p);
-            }
-        }
-    }
-
-    // Legacy / dev layouts with the full triple in the filename.
     let triples: &[&str] = &[
         "aarch64-apple-darwin",
         "x86_64-apple-darwin",
@@ -97,6 +68,7 @@ fn bundled_sidecar() -> Option<PathBuf> {
         "aarch64-unknown-linux-gnu",
     ];
     let mut search_dirs: Vec<PathBuf> = vec![exe_dir.join("binaries"), exe_dir.clone()];
+    // macOS .app layout: exe lives in Contents/MacOS, resources in Contents/Resources.
     if let Some(contents) = exe_dir.parent() {
         search_dirs.push(contents.join("Resources").join("binaries"));
         search_dirs.push(contents.join("Resources"));
@@ -132,15 +104,7 @@ fn pick_launcher() -> Result<Launcher> {
              в dev — что приложение запущено вне репозитория."
         )
     })?;
-    // venv-layout зависит от платформы: Unix даёт `.venv/bin/python`,
-    // Windows — `.venv\Scripts\python.exe`. Symlink-альтернативы там нет,
-    // выбираем строго по cfg.
-    let venv = root.join("python-sidecar").join(".venv");
-    let py = if cfg!(windows) {
-        venv.join("Scripts").join("python.exe")
-    } else {
-        venv.join("bin").join("python")
-    };
+    let py = root.join("python-sidecar/.venv/bin/python");
     if !py.exists() {
         return Err(anyhow!(
             "Python venv не найден: {} — выполните `cd python-sidecar && uv sync`",
@@ -178,11 +142,6 @@ pub async fn spawn<R: Runtime>(app: AppHandle<R>) -> Result<()> {
             c
         }
     };
-    // Force the worker to emit UTF-8 on stdout/stderr regardless of the
-    // host console's codepage. On a Russian-locale Windows the default is
-    // cp1251, which kills any log record containing dashes / arrows.
-    cmd.env("PYTHONIOENCODING", "utf-8");
-    cmd.env("PYTHONUTF8", "1");
 
     let mut child: Child = cmd.spawn().context("spawn python sidecar failed")?;
 

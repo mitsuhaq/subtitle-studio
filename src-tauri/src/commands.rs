@@ -109,29 +109,6 @@ pub fn cancel_extra(id: String, flags: State<'_, DownloadFlags>) -> Result<(), S
     Ok(())
 }
 
-/// Probe a video's duration in seconds via ffmpeg. Used by the Utils trim
-/// UI: the previous client-side approach (`<video src="asset://...">`)
-/// fails on Windows because backslashes in absolute paths don't survive
-/// the asset URL roundtrip; routing through the same ffmpeg we already
-/// have in settings is the platform-neutral fallback.
-#[tauri::command]
-pub async fn probe_video_duration(
-    video_path: PathBuf,
-    settings: State<'_, SettingsStore>,
-) -> Result<f32, String> {
-    if !video_path.exists() {
-        return Err(format!("Файл не найден: {}", video_path.display()));
-    }
-    let snap = settings.snapshot();
-    let ffmpeg = snap
-        .ffmpeg_path
-        .clone()
-        .ok_or_else(|| "FFmpeg не установлен — Setup".to_string())?;
-    crate::preview::probe_duration_public(&ffmpeg, &video_path)
-        .await
-        .ok_or_else(|| "Не удалось прочитать длительность видео".to_string())
-}
-
 // ---------------------------------------------------------------------------
 // CorridorKey (chroma key) — placeholder pipeline. Real RVM-powered run
 // will replace the body once the Python sidecar grows an /chroma-key
@@ -187,7 +164,7 @@ static UTILS_CANCEL: once_cell::sync::Lazy<std::sync::Mutex<Option<u32>>> =
 pub fn utils_cancel() {
     if let Ok(g) = UTILS_CANCEL.lock() {
         if let Some(pid) = *g {
-            crate::proc::kill_pid(pid);
+            let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
         }
     }
 }
@@ -467,7 +444,9 @@ static AUDIO_FIX_CANCEL: once_cell::sync::Lazy<
 pub fn audio_fix_cancel() {
     if let Ok(guard) = AUDIO_FIX_CANCEL.lock() {
         if let Some(pid) = *guard {
-            crate::proc::kill_pid(pid);
+            let _ = std::process::Command::new("kill")
+                .arg(pid.to_string())
+                .status();
         }
     }
 }
@@ -491,21 +470,8 @@ pub async fn audio_fix_run<R: Runtime>(
         .clone()
         .ok_or_else(|| "FFmpeg не установлен — Setup".to_string())?;
 
-    // Stage RNNoise model (if needed) into a temp folder with a safe ASCII
-    // basename. We then run ffmpeg with `current_dir` = that folder and pass
-    // bare filenames to filters — same trick as the burn-in `subtitles=`
-    // path, for the same reason: filter args treat `:` as a separator and
-    // `\` as an escape, which mangles any Windows absolute path.
-    let work_dir = std::env::temp_dir().join("subtitle-studio-audiofix");
-    tokio::fs::create_dir_all(&work_dir).await.ok();
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-
     // Build the audio filter chain. Empty = passthrough.
     let mut filters: Vec<String> = Vec::new();
-    let mut staged_model: Option<PathBuf> = None;
     if options.denoise {
         let model = setup::extra_dest("rnnoise_model").ok_or_else(|| {
             "Не нашёл путь к модели RNNoise".to_string()
@@ -515,17 +481,10 @@ pub async fn audio_fix_run<R: Runtime>(
                 "Модель RNNoise не установлена — поставьте её в Setup.".to_string(),
             );
         }
-        let staged = work_dir.join(format!("rnnoise-{nonce}.bin"));
-        tokio::fs::copy(&model, &staged)
-            .await
-            .map_err(|e| format!("stage rnnoise model: {e}"))?;
-        let basename = staged
-            .file_name()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| "non-utf8 staged filename".to_string())?
-            .to_string();
-        filters.push(format!("arnndn=m={basename}"));
-        staged_model = Some(staged);
+        // FFmpeg's filter parser also strips backslashes — wrap the path
+        // in single quotes after escaping any embedded `'`.
+        let path_safe = model.to_string_lossy().replace('\'', "\\'");
+        filters.push(format!("arnndn=m='{path_safe}'"));
     }
     if options.loudnorm {
         let lufs = options.target_lufs.clamp(-50.0, -5.0);
@@ -563,20 +522,11 @@ pub async fn audio_fix_run<R: Runtime>(
         serde_json::json!({ "stage": "Кодирование", "pos": 0.0, "total": total_ms as f64 / 1000.0 }),
     );
 
-    log::info!(
-        "audio_fix: ffmpeg cwd={} af={} in={} out={}",
-        work_dir.display(),
-        af,
-        video_path.display(),
-        out_path.display()
-    );
-
     let mut child = tokio::process::Command::new(&ffmpeg)
-        .current_dir(&work_dir)
         .arg("-y")
         .arg("-hide_banner")
         .arg("-loglevel")
-        .arg("info")
+        .arg("error")
         .arg("-i")
         .arg(&video_path)
         .args(["-af", &af])
@@ -595,9 +545,7 @@ pub async fn audio_fix_run<R: Runtime>(
         }
     }
 
-    // Drain stderr for `out_time_us=...` progress markers AND log
-    // everything else — we need the diagnostic output when ffmpeg fails
-    // (filter init errors, codec mismatches, etc.).
+    // Drain stderr for `out_time_us=...` progress markers.
     let stderr = child.stderr.take().ok_or("no stderr".to_string())?;
     let app_progress = app.clone();
     let progress_task = tokio::spawn(async move {
@@ -616,10 +564,6 @@ pub async fn audio_fix_run<R: Runtime>(
                         }),
                     );
                 }
-            } else if !line.is_empty() && !line.starts_with("frame=") && !line.contains('=') {
-                log::info!("[ffmpeg audio_fix] {line}");
-            } else if line.to_lowercase().contains("error") || line.contains("Invalid") {
-                log::warn!("[ffmpeg audio_fix] {line}");
             }
         }
     });
@@ -628,9 +572,6 @@ pub async fn audio_fix_run<R: Runtime>(
     let _ = progress_task.await;
     if let Ok(mut g) = AUDIO_FIX_CANCEL.lock() {
         *g = None;
-    }
-    if let Some(staged) = staged_model.as_ref() {
-        let _ = tokio::fs::remove_file(staged).await;
     }
 
     if !status.success() {
