@@ -59,13 +59,8 @@ def words_to_cues(words: Iterable[Word], cfg: SrtConfig) -> list[Cue]:
             return
         start = cur[0].start
         end = cur[-1].end
-        # Stretch to min_duration; never beyond max_duration.
-        if end - start < cfg.min_duration:
-            end = start + cfg.min_duration
-        # If too short for the text length given the target CPS, extend.
-        needed = len(text) / max(1.0, cfg.target_cps)
-        if end - start < needed:
-            end = start + needed
+        # Cap at max_duration — leave min_duration / target_cps stretching
+        # to the post-pass below so we don't overlap into the next cue.
         if end - start > cfg.max_duration:
             end = start + cfg.max_duration
         cues.append(Cue(start, end, text))
@@ -86,12 +81,23 @@ def words_to_cues(words: Iterable[Word], cfg: SrtConfig) -> list[Cue]:
         cur_chars += added
     flush()
 
-    # Avoid overlaps: if cue N+1 starts before cue N ends, push cue N to end
-    # at the next cue's start (the next word actually started speaking, so the
-    # current cue must end then).
-    for i in range(len(cues) - 1):
-        if cues[i].end > cues[i + 1].start:
-            cues[i].end = max(cues[i].start + cfg.min_duration, cues[i + 1].start)
+    # Post-pass: extend each cue toward min_duration / target_cps reading
+    # comfort, but **only up to** the next cue's start. This guarantees
+    # cues never overlap on screen, so the user sees one line at a time
+    # instead of two cues stacking when speech is rapid.
+    for i, c in enumerate(cues):
+        next_start = cues[i + 1].start if i + 1 < len(cues) else float("inf")
+        ideal = max(
+            c.end,
+            c.start + cfg.min_duration,
+            c.start + len(c.text) / max(1.0, cfg.target_cps),
+        )
+        ideal = min(ideal, c.start + cfg.max_duration)
+        c.end = min(ideal, next_start)
+        # Safety: end must still come after start (could happen on very
+        # tight back-to-back words). Pin to a 1-frame minimum.
+        if c.end <= c.start:
+            c.end = c.start + 0.04
     return cues
 
 

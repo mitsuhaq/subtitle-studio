@@ -1,7 +1,11 @@
+import { useEffect, useState } from "react";
 import { GlassCard } from "../components/GlassCard";
 import { ProgressBar } from "../components/ProgressBar";
 import { PixelSpinner } from "../components/PixelSpinner";
 import { UpdaterCard } from "../components/UpdaterCard";
+import { ExtraComponentCard } from "../components/ExtraComponentCard";
+import { listExtras } from "../lib/tauri";
+import type { ExtraComponentDef } from "../lib/tauri";
 import {
   PixelCheck,
   PixelCircle,
@@ -28,6 +32,12 @@ type Phase = "idle" | "running" | "done" | "error" | "cancelled";
 export default function SetupTab() {
   const setup = useSetup();
   const { status } = setup;
+  const [extras, setExtras] = useState<ExtraComponentDef[]>([]);
+  useEffect(() => {
+    listExtras()
+      .then(setExtras)
+      .catch(() => setExtras([]));
+  }, []);
 
   return (
     <div className="p-6 max-w-5xl mx-auto grid gap-6">
@@ -87,6 +97,17 @@ export default function SetupTab() {
         onCancel={() => setup.cancel("ffmpeg")}
         onBrowse={setup.browseFfmpeg}
       />
+
+      {extras.length > 0 && (
+        <>
+          <div className="mt-2 text-xs text-zinc-500 uppercase tracking-wide">
+            Модели модулей
+          </div>
+          {extras.map((e) => (
+            <ExtraComponentCard key={e.id} def={e} />
+          ))}
+        </>
+      )}
 
       <UpdaterCard />
     </div>

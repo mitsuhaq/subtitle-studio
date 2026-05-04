@@ -1,7 +1,7 @@
 [package]
-name = "subtitle-studio"
-version = "0.1.0"
-description = "Subtitle Studio — portable subtitle generator and burner"
+name = "zonthor-studio"
+version = "0.2.0"
+description = "Zonthor Studio — portable multimedia toolkit (subtitles, chroma key, eye contact, audio fix)"
 edition = "2021"
 rust-version = "1.77"
 

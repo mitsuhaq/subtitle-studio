@@ -100,6 +100,7 @@ class TranscriptionEngine:
         translate: bool = False,
         vad: bool = True,
         beam_size: int = 1,
+        initial_prompt: str | None = None,
     ) -> Iterator[tuple[str, dict]]:
         """Yield (event_type, payload) tuples.
 
@@ -116,6 +117,7 @@ class TranscriptionEngine:
             word_timestamps=True,
             beam_size=beam_size,
             condition_on_previous_text=False,
+            initial_prompt=(initial_prompt or None) if initial_prompt else None,
         )
         yield (
             "meta",

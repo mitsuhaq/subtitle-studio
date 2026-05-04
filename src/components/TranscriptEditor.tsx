@@ -4,12 +4,15 @@ import {
   DEFAULT_STYLE,
   getSettings,
   notify,
+  onPipelineProgress,
   readSrt,
   reburnVideo,
   revealInShell,
   writeSrt,
 } from "../lib/tauri";
-import type { SrtCue } from "../lib/tauri";
+import type { PipelineProgress, SrtCue } from "../lib/tauri";
+import { ProgressBar } from "./ProgressBar";
+import { PixelSpinner } from "./PixelSpinner";
 import { PixelCheck, PixelFolder, PixelRefresh, PixelX } from "./icons";
 
 interface Props {
@@ -43,6 +46,25 @@ export function TranscriptEditor({
   const [reburning, setReburning] = useState(false);
   const [reburnedPath, setReburnedPath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [reburnProgress, setReburnProgress] = useState<PipelineProgress | null>(null);
+
+  // Subscribe to the pipeline progress channel only while we're reburning,
+  // so we don't pick up events from a parallel transcription job. Same
+  // channel as the main flow — the editor just renders its own bar inside
+  // the modal.
+  useEffect(() => {
+    if (!reburning) return;
+    let aborted = false;
+    let unlisten: (() => void) | null = null;
+    onPipelineProgress((p) => setReburnProgress(p)).then((un) => {
+      if (aborted) un();
+      else unlisten = un;
+    });
+    return () => {
+      aborted = true;
+      unlisten?.();
+    };
+  }, [reburning]);
 
   // Load on open / path change
   useEffect(() => {
@@ -110,6 +132,7 @@ export function TranscriptEditor({
   const saveAndReburn = async () => {
     if (!srtPath || !videoPath) return;
     setReburnedPath(null);
+    setReburnProgress(null);
     if (dirty) {
       const ok = await save();
       if (!ok) return;
@@ -122,7 +145,7 @@ export function TranscriptEditor({
       const out = await reburnVideo(videoPath, srtPath, style);
       setReburnedPath(out);
       const name = out.split("/").pop() ?? out;
-      await notify("Subtitle Studio — перевшито", name);
+      await notify("Zonthor Studio — перевшито", name);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -207,7 +230,29 @@ export function TranscriptEditor({
           </div>
         </div>
 
-        {reburnedPath && (
+        {reburning && (
+          <div className="px-5 py-3 border-t border-white/[0.06] bg-white/[0.02] space-y-2">
+            <div className="flex items-center gap-2 text-[12px] text-zinc-300">
+              <PixelSpinner size={14} className="text-gold-300 shrink-0" />
+              <span className="truncate">
+                {reburnProgress?.stage ?? "Подготовка"}
+                {reburnProgress?.detail ? ` · ${reburnProgress.detail}` : ""}
+              </span>
+            </div>
+            <ProgressBar
+              value={reburnProgress?.pos ?? 0}
+              total={reburnProgress?.total ?? 0}
+              label={
+                reburnProgress?.total
+                  ? `${formatTime(reburnProgress.pos)} / ${formatTime(reburnProgress.total)}`
+                  : "—"
+              }
+              pulsing={!reburnProgress?.total}
+            />
+          </div>
+        )}
+
+        {reburnedPath && !reburning && (
           <div className="px-5 py-2.5 border-t border-white/[0.06] bg-gold-500/[0.06] flex items-center justify-between gap-3 text-[12px] text-gold-200/95">
             <div className="flex items-center gap-2 min-w-0">
               <PixelCheck size={12} />
@@ -289,4 +334,12 @@ function formatStamp(ms: number): string {
   const s = Math.floor((ms % 60_000) / 1_000);
   const milli = ms % 1_000;
   return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}.${milli.toString().padStart(3, "0")}`;
+}
+
+function formatTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
+  const total = Math.floor(seconds);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
 }

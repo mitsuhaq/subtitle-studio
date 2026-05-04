@@ -30,6 +30,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .ass_writer import AssStyle, write_ass
+from . import chroma_key
 from .srt import SrtConfig, words_to_cues, write_srt
 from .whisper_engine import CancelledError, TranscriptionEngine
 
@@ -84,10 +85,13 @@ class TranscribeRequest(BaseModel):
     translate: bool = False
     vad: bool = True
     beam_size: int = Field(default=1, ge=1, le=10)
-    max_chars: int = Field(default=42, ge=10, le=120)
+    max_chars: int = Field(default=40, ge=13, le=40)
     min_duration: float = Field(default=0.6, ge=0.1, le=10.0)
     max_duration: float = Field(default=6.0, ge=1.0, le=20.0)
     target_cps: float = Field(default=17.0, ge=4.0, le=40.0)
+    initial_prompt: str | None = None
+    play_res_x: int | None = None
+    play_res_y: int | None = None
 
 
 @app.get("/health", response_model=Health)
@@ -152,6 +156,7 @@ async def transcribe(req: TranscribeRequest) -> StreamingResponse:
                 translate=req.translate,
                 vad=req.vad,
                 beam_size=req.beam_size,
+                initial_prompt=req.initial_prompt,
             ):
                 if event_type == "meta":
                     meta = payload
@@ -187,7 +192,13 @@ async def transcribe(req: TranscribeRequest) -> StreamingResponse:
             ass_path: str | None = None
             if req.output_ass:
                 style_dict = (req.style or StyleModel()).model_dump()
-                write_ass(cues, AssStyle(**style_dict), req.output_ass)
+                write_ass(
+                    cues,
+                    AssStyle(**style_dict),
+                    req.output_ass,
+                    play_w=req.play_res_x or 1920,
+                    play_h=req.play_res_y or 1080,
+                )
                 ass_path = req.output_ass
             done = {
                 "cues_count": len(cues),
@@ -208,6 +219,68 @@ async def transcribe(req: TranscribeRequest) -> StreamingResponse:
             loop.call_soon_threadsafe(
                 queue.put_nowait, _sse("error", {"message": str(exc)})
             )
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, None)
+
+    threading.Thread(target=producer, daemon=True).start()
+
+    async def stream():
+        while True:
+            chunk = await queue.get()
+            if chunk is None:
+                break
+            yield chunk
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+class ChromaKeyRequest(BaseModel):
+    model_path: str
+    input_video: str
+    output_video: str
+    background_kind: str  # transparent | color | image | video
+    background_color: str | None = None
+    background_path: str | None = None
+    mode: str = "chroma_key"  # "chroma_key" | "rotobrush"
+
+
+@app.post("/chroma-key")
+async def chroma_key_endpoint(req: ChromaKeyRequest) -> StreamingResponse:
+    if not Path(req.model_path).exists():
+        raise HTTPException(400, f"RVM model not found: {req.model_path}")
+    if not Path(req.input_video).exists():
+        raise HTTPException(400, f"Input video not found: {req.input_video}")
+
+    state.cancel_event.clear()
+    queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def producer() -> None:
+        def push(event_type: str, payload: dict[str, Any]) -> None:
+            loop.call_soon_threadsafe(queue.put_nowait, _sse(event_type, payload))
+
+        def on_progress(pos: int, total: int) -> None:
+            push("progress", {"pos": pos, "total": total})
+
+        try:
+            result = chroma_key.run(
+                req.model_path,
+                req.input_video,
+                req.output_video,
+                req.background_kind,
+                req.background_color,
+                req.background_path,
+                mode=req.mode,
+                on_progress=on_progress,
+                cancel=state.cancel_event,
+            )
+            push("done", result)
+        except chroma_key.CancelledError:
+            log.info("chroma key cancelled by client")
+            push("cancelled", {})
+        except Exception as exc:  # noqa: BLE001
+            log.error("chroma key failed: %s\n%s", exc, traceback.format_exc())
+            push("error", {"message": str(exc)})
         finally:
             loop.call_soon_threadsafe(queue.put_nowait, None)
 

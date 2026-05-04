@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Subtitle Studio",
-  "version": "0.1.0",
-  "identifier": "com.subtitle.studio",
+  "productName": "Zonthor Studio",
+  "version": "0.2.0",
+  "identifier": "com.zonthor.studio",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Subtitle Studio",
+        "title": "Zonthor Studio",
         "width": 1180,
         "height": 760,
         "minWidth": 980,

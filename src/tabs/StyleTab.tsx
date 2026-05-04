@@ -54,11 +54,19 @@ export default function StyleTab() {
   const flashTimer = useRef<number | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [autoRatio, setAutoRatio] = useState<number | null>(null);
-  const [previewText, setPreviewText] = useState("Пример субтитра");
+  const [previewText, setPreviewText] = useState("Lorem ipsum dolor sit");
+  // When false (initial / after reset), the preview text is auto-generated
+  // from `maxChars` so the user *sees* exactly how many characters their
+  // current setting allows. Touching the field flips this to true → manual.
+  const [previewTextManual, setPreviewTextManual] = useState(false);
   const [previewFrameSrc, setPreviewFrameSrc] = useState<string | null>(null);
   const [previewFrameError, setPreviewFrameError] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [promptOpen, setPromptOpen] = useState(false);
+  // Whisper transcription opts (live alongside style — not part of presets).
+  const [initialPrompt, setInitialPrompt] = useState<string>("");
+  const [maxCharsAuto, setMaxCharsAuto] = useState<boolean>(true);
+  const [maxChars, setMaxChars] = useState<number>(42);
 
   // Initial load: presets + last_style + system fonts
   useEffect(() => {
@@ -171,6 +179,44 @@ export default function StyleTab() {
     if (match && !stylesEqual(match.style, style)) setActiveName("");
   }, [style, activeName, presets]);
 
+  // Live-sync preview text to current max_chars while in auto mode — so a
+  // slider drag immediately shows what fits.
+  useEffect(() => {
+    if (previewTextManual) return;
+    setPreviewText(loremForLen(maxChars));
+  }, [maxChars, previewTextManual]);
+
+  // Auto max_chars — derived from video width, font size, bold weight.
+  // For horizontally-centered alignments (2/5/8) the ASS writer forces
+  // MarginL = MarginR = 0, so text actually has the *full* screen width to
+  // play with — we mirror that here instead of pessimistically subtracting
+  // the user's L/R margins. Glyph factors are tuned to Inter's real
+  // metrics (regular ≈0.5×, bold ≈0.55×) and safety is generous (0.95)
+  // because libass + WrapStyle=2 won't double-stack lines anymore.
+  useEffect(() => {
+    if (!maxCharsAuto) return;
+    const refH = 1080;
+    const refW = (autoRatio ?? 16 / 9) * refH;
+    const isHCenter = [2, 5, 8].includes(style.alignment);
+    const margins = isHCenter ? 0 : style.margin_l + style.margin_r;
+    const usable = Math.max(100, refW - margins);
+    // Tighter glyph factor — reflects how mixed-case prose actually
+    // measures in Inter (~0.45× regular, 0.5× bold), not the worst-case
+    // all-caps width. No safety multiplier — libass + WrapStyle=2 keeps
+    // each cue on a single line, and the writer caps cue length itself.
+    const glyph = style.font_size * (style.bold ? 0.5 : 0.45);
+    const fitted = Math.floor(usable / glyph);
+    setMaxChars(Math.max(13, Math.min(40, fitted)));
+  }, [
+    maxCharsAuto,
+    autoRatio,
+    style.font_size,
+    style.bold,
+    style.alignment,
+    style.margin_l,
+    style.margin_r,
+  ]);
+
   const sidecarReady = state.sidecar?.running ?? false;
   const isRunning = state.phase === "running";
   const hasSelection = !!state.videoPath || !!state.batch;
@@ -262,7 +308,12 @@ export default function StyleTab() {
       console.error("saveLastStyle failed", err);
     }
     goto("queue");
-    void transcribe({ burn_in: burnIn, style });
+    void transcribe({
+      burn_in: burnIn,
+      style,
+      initial_prompt: initialPrompt.trim() || undefined,
+      max_chars: maxChars,
+    });
   };
 
   // Space on Style = «Запустить» (when ready). Disabled on every other tab
@@ -324,6 +375,68 @@ export default function StyleTab() {
               <span>Запустить</span>
               <PixelArrowRight size={16} />
             </button>
+          </div>
+        </div>
+      </GlassCard>
+
+      <GlassCard>
+        <h2 className="text-sm font-semibold text-zinc-200 mb-3">
+          Транскрипция
+        </h2>
+        <div className="grid gap-3">
+          <label className="text-xs text-zinc-500 block">
+            Контекст для Whisper
+            <textarea
+              value={initialPrompt}
+              onChange={(e) => setInitialPrompt(e.target.value)}
+              placeholder="Имена, бренды, термины через пробел или запятую — Whisper будет ловить их точнее. Пример: Anthropic, Claude, gradient descent, RAG."
+              rows={2}
+              className="mt-1.5 w-full bg-bg-900 border border-white/10 rounded px-2.5 py-2 text-[12px] text-zinc-200 leading-snug resize-none focus:outline-none focus:border-gold-500/50"
+            />
+          </label>
+
+          <div className="grid grid-cols-[1fr_auto] gap-3 items-center">
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-xs text-zinc-500">
+                  Максимум символов в строке
+                  {maxCharsAuto && (
+                    <span className="text-gold-300/70 ml-2">авто = {maxChars}</span>
+                  )}
+                </span>
+                {!maxCharsAuto && (
+                  <span className="text-[11px] text-gold-200/90 tabular-nums">
+                    {maxChars}
+                  </span>
+                )}
+              </div>
+              <input
+                type="range"
+                min={13}
+                max={40}
+                step={1}
+                value={maxChars}
+                onChange={(e) => {
+                  setMaxCharsAuto(false);
+                  setMaxChars(Number(e.target.value));
+                }}
+                disabled={maxCharsAuto}
+                className="w-full accent-gold-500 disabled:opacity-50"
+              />
+            </div>
+            <label className="flex items-center gap-2 text-xs text-zinc-300 cursor-pointer select-none whitespace-nowrap">
+              <input
+                type="checkbox"
+                checked={maxCharsAuto}
+                onChange={(e) => setMaxCharsAuto(e.target.checked)}
+                className="accent-gold-500 w-3.5 h-3.5"
+              />
+              Авто
+            </label>
+          </div>
+          <div className="text-[10px] text-zinc-600">
+            Авто считает максимум по ширине видео и параметрам шрифта (с
+            запасом 8%). Сними галочку чтобы выставить вручную.
           </div>
         </div>
       </GlassCard>
@@ -443,13 +556,33 @@ export default function StyleTab() {
             )}
           </div>
 
-          <input
-            type="text"
-            value={previewText}
-            onChange={(e) => setPreviewText(e.target.value)}
-            placeholder="Текст для примера…"
-            className="w-full mb-3 bg-bg-900 border border-white/10 rounded px-2.5 py-1.5 text-xs text-zinc-200 focus:outline-none focus:border-gold-500/50"
-          />
+          <div className="relative mb-3">
+            <input
+              type="text"
+              value={previewText}
+              onChange={(e) => {
+                setPreviewText(e.target.value);
+                setPreviewTextManual(true);
+              }}
+              placeholder="Текст для примера…"
+              className="w-full bg-bg-900 border border-white/10 rounded px-2.5 py-1.5 pr-20 text-xs text-zinc-200 focus:outline-none focus:border-gold-500/50"
+            />
+            <button
+              type="button"
+              onClick={() => {
+                setPreviewTextManual(false);
+                setPreviewText(loremForLen(maxChars));
+              }}
+              className={`absolute right-1.5 top-1/2 -translate-y-1/2 text-[10px] uppercase tracking-wide px-2 py-0.5 rounded border transition-colors ${
+                previewTextManual
+                  ? "border-white/15 bg-white/[0.04] text-zinc-300 hover:border-gold-500/30"
+                  : "border-gold-500/40 bg-gold-500/15 text-gold-200"
+              }`}
+              title="Подставлять лорем-ипсум по длине max_chars"
+            >
+              Lorem
+            </button>
+          </div>
 
           <PreviewBox
             style={style}
@@ -969,6 +1102,26 @@ function PreviewBox({
     </div>
     </div>
   );
+}
+
+const LOREM_WORDS =
+  "Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua".split(
+    " ",
+  );
+
+/** Build a preview line at most `maxChars` characters long, joining whole
+ *  Lorem words. If even the first word doesn't fit it gets truncated to
+ *  the exact char budget so the user always sees a string of approx that
+ *  visual length. */
+function loremForLen(maxChars: number): string {
+  let out = "";
+  for (const w of LOREM_WORDS) {
+    const cand = out ? out + " " + w : w;
+    if (cand.length > maxChars) break;
+    out = cand;
+  }
+  if (!out) return LOREM_WORDS[0].slice(0, Math.max(1, maxChars));
+  return out;
 }
 
 function formatAspectLabel(ratio: number): string {

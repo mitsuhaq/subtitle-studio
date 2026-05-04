@@ -91,6 +91,10 @@ pub struct TranscribeOptions {
     pub target_cps: f32,
     pub burn_in: bool,
     pub style: SubtitleStyle,
+    /// Free-form text passed to Whisper as `initial_prompt` — biases the
+    /// decoder towards specific names, brand spellings, jargon, etc.
+    /// Empty string ≡ no prompt.
+    pub initial_prompt: String,
 }
 
 impl Default for TranscribeOptions {
@@ -106,6 +110,7 @@ impl Default for TranscribeOptions {
             target_cps: 17.0,
             burn_in: true,
             style: SubtitleStyle::default(),
+            initial_prompt: String::new(),
         }
     }
 }
@@ -255,6 +260,10 @@ async fn run_inner<R: Runtime>(
         None
     };
 
+    // Probe the source's real dimensions so libass uses them as PlayResX/Y
+    // — keeps centering exact for vertical (9:16) and square (1:1) videos.
+    let play_res = crate::preview::probe_video_dimensions(&ffmpeg, &video_path).await;
+
     emit_stage(&app, "Транскрипция", None);
     let result = stream_transcribe(
         &app,
@@ -265,6 +274,7 @@ async fn run_inner<R: Runtime>(
         &model_dir,
         &opts,
         cancel_flag.clone(),
+        play_res,
     )
     .await;
     let _ = tokio::fs::remove_file(&wav).await;
@@ -501,6 +511,11 @@ struct SidecarTranscribeRequest<'a> {
     min_duration: f32,
     max_duration: f32,
     target_cps: f32,
+    initial_prompt: Option<String>,
+    /// Real source video dimensions — written into the ASS as PlayResX/Y so
+    /// libass renders without aspect-ratio scaling artefacts.
+    play_res_x: Option<u32>,
+    play_res_y: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -544,6 +559,7 @@ async fn stream_transcribe<R: Runtime>(
     model_dir: &Path,
     opts: &TranscribeOptions,
     cancel_flag: Arc<AtomicBool>,
+    play_res: Option<(u32, u32)>,
 ) -> Result<TranscribeResult> {
     let url = format!("http://127.0.0.1:{port}/transcribe");
     let ass_str = match output_ass {
@@ -568,6 +584,13 @@ async fn stream_transcribe<R: Runtime>(
         min_duration: opts.min_duration,
         max_duration: opts.max_duration,
         target_cps: opts.target_cps,
+        initial_prompt: if opts.initial_prompt.trim().is_empty() {
+            None
+        } else {
+            Some(opts.initial_prompt.clone())
+        },
+        play_res_x: play_res.map(|(w, _)| w),
+        play_res_y: play_res.map(|(_, h)| h),
     };
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60 * 60))
@@ -701,6 +724,8 @@ fn trim_text(s: &str) -> Option<String> {
 pub fn build_ass_from_srt(
     cues: &[crate::srt_io::SrtCue],
     style: &SubtitleStyle,
+    play_w: u32,
+    play_h: u32,
 ) -> String {
     let primary = hex_to_ass_color(&style.primary_color, 100);
     let bold = if style.bold { -1 } else { 0 };
@@ -710,6 +735,9 @@ pub fn build_ass_from_srt(
     } else {
         style.outline_width
     };
+    let is_h_center = matches!(style.alignment, 2 | 5 | 8);
+    let eff_ml = if is_h_center { 0 } else { style.margin_l };
+    let eff_mr = if is_h_center { 0 } else { style.margin_r };
     let (outline, back) = if style.border_style == 3 {
         (
             hex_to_ass_color(&style.back_color, 100),
@@ -726,8 +754,8 @@ pub fn build_ass_from_srt(
     out.push_str(&format!(
 "[Script Info]\n\
 ScriptType: v4.00+\n\
-PlayResX: 1920\n\
-PlayResY: 1080\n\
+PlayResX: {play_w}\n\
+PlayResY: {play_h}\n\
 WrapStyle: 2\n\
 ScaledBorderAndShadow: yes\n\
 YCbCr Matrix: TV.709\n\n\
@@ -747,16 +775,20 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\
         outline_w = border_outline,
         shadow = style.shadow_offset,
         align = style.alignment,
-        ml = style.margin_l,
-        mr = style.margin_r,
+        ml = eff_ml,
+        mr = eff_mr,
         mv = style.margin_v,
+        play_w = play_w,
+        play_h = play_h,
     ));
+    let prefix = format!("{{\\an{}}}", style.alignment);
     for c in cues {
         let safe = c.text.replace('\n', " ").replace('{', "(").replace('}', ")");
         out.push_str(&format!(
-            "Dialogue: 0,{},{},Default,,0,0,0,,{}\n",
+            "Dialogue: 0,{},{},Default,,0,0,0,,{}{}\n",
             ms_to_ass(c.start_ms),
             ms_to_ass(c.end_ms),
+            prefix,
             safe
         ));
     }
@@ -837,7 +869,10 @@ pub async fn reburn<R: Runtime>(
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let ass_path = safe_dir.join(format!("reburn-{nonce}.ass"));
-    let ass = build_ass_from_srt(&cues, &style);
+    let (pw, ph) = crate::preview::probe_video_dimensions(&ffmpeg, &video_path)
+        .await
+        .unwrap_or((1920, 1080));
+    let ass = build_ass_from_srt(&cues, &style, pw, ph);
     tokio::fs::write(&ass_path, ass.as_bytes()).await?;
 
     let burned = default_burned_path(&video_path, settings.output_dir.as_deref());

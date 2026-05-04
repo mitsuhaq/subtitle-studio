@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -21,8 +22,15 @@ pub struct Settings {
     /// resetting to defaults.
     pub last_style: Option<SubtitleStyle>,
     /// Optional override directory for `.srt` and `_subtitled.<ext>` outputs.
-    /// `None` ≡ "next to the source video" (legacy behaviour).
+    /// `None` ≡ "next to the source video" (legacy behaviour). Used by the
+    /// Subtitles module specifically — kept for back-compat. Other modules
+    /// look up `module_output_dirs[<their_id>]` first and fall back to None.
     pub output_dir: Option<PathBuf>,
+    /// Per-module output directory overrides keyed by module id (e.g.
+    /// "corridor_key", "rotobrush", "audio_fix", "utils"). Missing keys
+    /// mean "save next to the source video".
+    #[serde(default)]
+    pub module_output_dirs: HashMap<String, PathBuf>,
 }
 
 #[derive(Clone, Default)]
@@ -45,6 +53,16 @@ impl SettingsStore {
 
     pub fn snapshot(&self) -> Settings {
         self.inner.read().clone()
+    }
+
+    /// Resolve the output directory for a non-Subtitles module, or None if
+    /// the user hasn't set one (caller should default to "next to source").
+    pub fn module_output_dir(&self, module_id: &str) -> Option<PathBuf> {
+        self.inner
+            .read()
+            .module_output_dirs
+            .get(module_id)
+            .cloned()
     }
 
     pub fn update<F: FnOnce(&mut Settings)>(&self, f: F) -> std::io::Result<()> {

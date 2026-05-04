@@ -10,6 +10,10 @@ dependencies = [
   "faster-whisper>=1.0.3",
   "av>=12.0.0",
   "onnxruntime>=1.18.0",
+  # Image I/O for chroma-key composite — pillow is light (~3 MB) and avoids
+  # dragging in opencv just for resize + alpha-merge.
+  "pillow>=10.4.0",
+  "numpy>=1.26.0",
 ]
 
 [dependency-groups]

@@ -1,25 +1,28 @@
 /**
- * Pixel-art "S" logo for the header. 16×16 pixel grid rendered with a gold
- * linear gradient and a subtle inner glow. `shape-rendering="crispEdges"` keeps
- * pixels crunchy at every scale.
+ * Pixel-art diamond logo for Zonthor Studio. 16×16 grid rendered with a gold
+ * linear gradient + diagonal inner highlight to read as a faceted gemstone
+ * rather than a flat rhombus. `shape-rendering="crispEdges"` keeps pixels
+ * crunchy at every scale.
  */
 
-const S_GRID = [
+// Solid diamond — same silhouette as the bundle .icns so the brand reads
+// consistently from Dock to in-app header.
+const DIAMOND_GRID = [
   "................",
   "................",
   "....########....",
   "...##########...",
-  "..####....####..",
-  "..####..........",
-  "..####..........",
-  "...########.....",
-  "....########....",
-  ".......######...",
-  "..........####..",
-  ".####.....####..",
-  "..####...####...",
+  "..############..",
+  ".##############.",
+  ".##############.",
+  "..############..",
   "...##########...",
   "....########....",
+  ".....######.....",
+  "......####......",
+  ".......##.......",
+  "................",
+  "................",
   "................",
 ];
 
@@ -29,24 +32,23 @@ interface Props {
 }
 
 export function Logo({ size = 32, className = "" }: Props) {
-  const rects = [];
-  for (let y = 0; y < S_GRID.length; y++) {
-    for (let x = 0; x < S_GRID[y].length; x++) {
-      if (S_GRID[y][x] === "#") {
-        rects.push(
+  const base: JSX.Element[] = [];
+  for (let y = 0; y < DIAMOND_GRID.length; y++) {
+    for (let x = 0; x < DIAMOND_GRID[y].length; x++) {
+      if (DIAMOND_GRID[y][x] === "#") {
+        base.push(
           <rect
-            key={`${x}-${y}`}
+            key={`b-${x}-${y}`}
             x={x}
             y={y}
             width="1"
             height="1"
-            fill="url(#logoGold)"
+            fill="url(#diamondBody)"
           />,
         );
       }
     }
   }
-
   return (
     <svg
       width={size}
@@ -55,16 +57,16 @@ export function Logo({ size = 32, className = "" }: Props) {
       shapeRendering="crispEdges"
       className={className}
       role="img"
-      aria-label="Subtitle Studio"
+      aria-label="Zonthor Studio"
     >
       <defs>
-        <linearGradient id="logoGold" x1="0" y1="0" x2="1" y2="1">
+        <linearGradient id="diamondBody" x1="0" y1="0" x2="1" y2="1">
           <stop offset="0%" stopColor="#f8e89a" />
           <stop offset="50%" stopColor="#f4d03f" />
           <stop offset="100%" stopColor="#a98a2b" />
         </linearGradient>
       </defs>
-      {rects}
+      {base}
     </svg>
   );
 }

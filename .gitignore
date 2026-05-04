@@ -11,6 +11,8 @@ src-tauri/binaries/worker-*
 python-sidecar/dist/
 python-sidecar/build/
 python-sidecar/__pycache__/
+python-sidecar/worker/__pycache__/
+**/__pycache__/
 python-sidecar/_pyinstaller_entry.py
 python-sidecar/worker.spec
 
@@ -27,3 +29,8 @@ src-tauri/tauri.release.conf.json
 .DS_Store
 .vscode/
 .idea/
+
+# Local backup .app copies (snapshots kept by user, not project source)
+*.app/
+*.app
+icon-source.png

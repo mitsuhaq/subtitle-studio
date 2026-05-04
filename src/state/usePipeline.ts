@@ -8,7 +8,6 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   cancelTranscription,
   defaultSrtPath,
@@ -22,7 +21,6 @@ import {
   saveQueue,
   sidecarStatus,
   transcribeVideo,
-  VIDEO_EXTS,
 } from "../lib/tauri";
 import type {
   PipelineProgress,
@@ -54,9 +52,6 @@ export interface PipelineState {
   batch: BatchItem[] | null;
   batchIndex: number;
 }
-
-const isVideoPath = (p: string) =>
-  VIDEO_EXTS.some((ext) => p.toLowerCase().endsWith(`.${ext}`));
 
 const initialState: PipelineState = {
   phase: "idle",
@@ -273,7 +268,6 @@ function usePipelineState() {
     // if cleanup already ran, immediately unlisten the late arrival.
     let aborted = false;
     let unlistenProgress: (() => void) | null = null;
-    let unlistenDrop: (() => void) | null = null;
 
     onPipelineProgress((p) => {
       // eslint-disable-next-line no-console
@@ -284,40 +278,16 @@ function usePipelineState() {
       else unlistenProgress = un;
     });
 
-    getCurrentWebview()
-      .onDragDropEvent((event) => {
-        if (event.payload.type === "drop") {
-          const paths = event.payload.paths;
-          const videos = paths.filter(isVideoPath);
-          const cur = stateRef.current;
-          // If a queue (or a single selected file) already exists, append
-          // instead of replacing — that's what users expect when they keep
-          // dropping more files in.
-          const hasExisting = !!cur.batch || !!cur.videoPath;
-          if (videos.length > 0) {
-            if (hasExisting) {
-              appendToBatch(videos);
-            } else if (videos.length === 1) {
-              selectVideo(videos[0]);
-            } else {
-              queueBatch(videos);
-            }
-          } else if (paths.length === 1) {
-            tryFolder(paths[0]);
-          }
-        }
-      })
-      .then((un) => {
-        if (aborted) un();
-        else unlistenDrop = un;
-      });
+    // Drop-into-window dispatch lives in each module instead of here, so
+    // a single drop only feeds the *active* module (Subtitles when its
+    // tab is open, CorridorKey when its tab is, etc.). Otherwise the
+    // same files would land in every module's queue at once.
 
     return () => {
       aborted = true;
       mounted.current = false;
       window.clearInterval(id);
       unlistenProgress?.();
-      unlistenDrop?.();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshSidecar]);
@@ -420,7 +390,7 @@ function usePipelineState() {
         const total = after.length;
         if (!cancelRequested.current) {
           await notify(
-            "Subtitle Studio — очередь готова",
+            "Zonthor Studio — очередь готова",
             errs > 0
               ? `${done} из ${total} · ошибок: ${errs}`
               : `${done} из ${total} файлов обработано`,
@@ -432,7 +402,7 @@ function usePipelineState() {
         const r = await transcribeOne(cur.videoPath, cur.outputSrt, opts);
         if (r.ok) {
           const name = cur.videoPath.split("/").pop() ?? cur.videoPath;
-          await notify("Subtitle Studio — готово", name);
+          await notify("Zonthor Studio — готово", name);
         }
       }
     },

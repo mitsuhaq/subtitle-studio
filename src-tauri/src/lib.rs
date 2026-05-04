@@ -52,6 +52,18 @@ pub fn run() {
             commands::download_whisper,
             commands::download_ffmpeg,
             commands::cancel_download,
+            commands::list_extras,
+            commands::extra_status,
+            commands::download_extra,
+            commands::cancel_extra,
+            commands::chroma_key_run,
+            commands::chroma_key_cancel,
+            commands::audio_fix_run,
+            commands::audio_fix_cancel,
+            commands::util_trim,
+            commands::util_convert,
+            commands::util_overlay,
+            commands::utils_cancel,
             commands::pick_ffmpeg,
             commands::open_data_dir,
             commands::sidecar_status,
@@ -65,6 +77,7 @@ pub fn run() {
             commands::delete_preset,
             commands::save_last_style,
             commands::set_output_dir,
+            commands::set_module_output_dir,
             commands::list_fonts,
             commands::extract_preview_frame,
             commands::render_styled_preview,
@@ -75,5 +88,5 @@ pub fn run() {
             commands::write_srt,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Subtitle Studio");
+        .expect("error while running Zonthor Studio");
 }

@@ -42,6 +42,7 @@ export interface AppSettings {
   ffmpeg_url_override: string | null;
   last_style: SubtitleStyle | null;
   output_dir: string | null;
+  module_output_dirs: Record<string, string>;
 }
 
 export interface Preset {
@@ -61,6 +62,143 @@ export const downloadFfmpeg = () => invoke<SetupStatus>("download_ffmpeg");
 
 export const cancelDownload = (component: Component) =>
   invoke<void>("cancel_download", { component });
+
+// ---------------------------------------------------------------------------
+// Extra components — neural-net models for the new modules. Generic enough
+// to add a new module by appending one row to the Rust EXTRAS array.
+// ---------------------------------------------------------------------------
+
+export interface ExtraComponentDef {
+  id: string;
+  name: string;
+  /** Modules this download unlocks. One model can power several modules
+   *  (e.g. RVM unlocks both CorridorKey and Rotobrush). */
+  module_ids: string[];
+  url: string; // empty ⇒ "coming soon"
+  size_bytes_hint: number;
+  filename: string;
+  hint: string;
+}
+
+export interface ComponentStatusInfo {
+  installed: boolean;
+  path: string | null;
+  size_bytes: number;
+  version: string | null;
+  message: string | null;
+}
+
+export const listExtras = () => invoke<ExtraComponentDef[]>("list_extras");
+export const extraStatus = (id: string) =>
+  invoke<ComponentStatusInfo>("extra_status", { id });
+export const downloadExtra = (id: string) =>
+  invoke<ComponentStatusInfo>("download_extra", { id });
+export const cancelExtra = (id: string) =>
+  invoke<void>("cancel_extra", { id });
+
+// ---------------------------------------------------------------------------
+// CorridorKey (chroma key)
+// ---------------------------------------------------------------------------
+
+export type ChromaBackgroundKind = "transparent" | "color" | "image" | "video";
+
+export interface ChromaOptions {
+  background_kind: ChromaBackgroundKind;
+  background_color?: string | null;
+  background_path?: string | null;
+  /** "chroma_key" (default) for green-screen footage, "rotobrush" for any
+   *  background — disables the chromakey preprocess + green-spill clamp. */
+  mode?: "chroma_key" | "rotobrush";
+}
+
+export interface ChromaResult {
+  output_video: string;
+}
+
+export interface ChromaProgress {
+  stage: string;
+  pos: number;
+  total: number;
+}
+
+export const chromaKeyRun = (videoPath: string, options: ChromaOptions) =>
+  invoke<ChromaResult>("chroma_key_run", { videoPath, options });
+
+export const chromaKeyCancel = () => invoke<void>("chroma_key_cancel");
+
+// ---------------------------------------------------------------------------
+// Audio Fix
+// ---------------------------------------------------------------------------
+
+export interface AudioFixOptions {
+  denoise: boolean;
+  loudnorm: boolean;
+  target_lufs: number;
+}
+
+export interface AudioFixResult {
+  output_video: string;
+}
+
+export interface AudioFixProgress {
+  stage: string;
+  pos: number;
+  total: number;
+}
+
+export const audioFixRun = (videoPath: string, options: AudioFixOptions) =>
+  invoke<AudioFixResult>("audio_fix_run", { videoPath, options });
+
+export const audioFixCancel = () => invoke<void>("audio_fix_cancel");
+
+// ---------------------------------------------------------------------------
+// Utils — trim / convert / overlay (pure FFmpeg)
+// ---------------------------------------------------------------------------
+
+export interface TrimOptions {
+  start?: number | null;
+  end?: number | null;
+}
+export interface ConvertOptions {
+  target: string; // mp4 | mov | webm | mkv | gif | mp3 | wav | aac | m4a
+}
+export interface OverlayOptions {
+  overlay_path: string;
+}
+export interface UtilResult {
+  output_path: string;
+}
+export interface UtilProgress {
+  stage: string;
+  pos: number;
+  total: number;
+}
+
+export const utilTrim = (videoPath: string, options: TrimOptions) =>
+  invoke<UtilResult>("util_trim", { videoPath, options });
+export const utilConvert = (videoPath: string, options: ConvertOptions) =>
+  invoke<UtilResult>("util_convert", { videoPath, options });
+export const utilOverlay = (videoPath: string, options: OverlayOptions) =>
+  invoke<UtilResult>("util_overlay", { videoPath, options });
+export const utilsCancel = () => invoke<void>("utils_cancel");
+
+export function onUtilsProgress(
+  cb: (p: UtilProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<UtilProgress>("utils://progress", (e) => cb(e.payload));
+}
+
+export function onAudioFixProgress(
+  cb: (p: AudioFixProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<AudioFixProgress>("audio_fix://progress", (e) => cb(e.payload));
+}
+
+export function onChromaProgress(
+  cb: (p: ChromaProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<ChromaProgress>("chroma://progress", (e) => cb(e.payload));
+}
 
 export const pickFfmpeg = (path: string) =>
   invoke<SetupStatus>("pick_ffmpeg", { path });
@@ -148,6 +286,8 @@ export interface TranscribeOptions {
   target_cps?: number;
   burn_in?: boolean;
   style?: SubtitleStyle;
+  /** Free-form Whisper bias text (names, brand spellings, jargon). */
+  initial_prompt?: string;
 }
 
 export interface TranscribeResult {
@@ -238,6 +378,9 @@ export const saveLastStyle = (style: SubtitleStyle) =>
 export const setOutputDir = (path: string | null) =>
   invoke<AppSettings>("set_output_dir", { path });
 
+export const setModuleOutputDir = (moduleId: string, path: string | null) =>
+  invoke<AppSettings>("set_module_output_dir", { moduleId, path });
+
 // ---------------------------------------------------------------------------
 // System fonts
 // ---------------------------------------------------------------------------
@@ -272,6 +415,17 @@ export function onPipelineProgress(
   cb: (p: PipelineProgress) => void,
 ): Promise<UnlistenFn> {
   return listen<PipelineProgress>("pipeline://progress", (e) => cb(e.payload));
+}
+
+export async function pickImageFile(): Promise<string | null> {
+  const result = await openDialog({
+    title: "Выберите картинку",
+    multiple: false,
+    directory: false,
+    filters: [{ name: "Картинка", extensions: ["png", "jpg", "jpeg", "webp", "bmp"] }],
+  });
+  if (!result) return null;
+  return Array.isArray(result) ? (result[0] ?? null) : result;
 }
 
 export async function pickVideoFile(): Promise<string | null> {

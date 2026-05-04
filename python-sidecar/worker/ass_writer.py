@@ -76,6 +76,16 @@ def write_ass(
         style.bg_padding if style.border_style == 3 else style.outline_width
     )
 
+    # For horizontally-centered alignments (2, 5, 8) we force MarginL = MarginR = 0
+    # in the style. libass otherwise sometimes off-centers when the values
+    # are equal — most commonly when the chosen font has a fallback that
+    # widens the rendered text past the available area. Centered alignments
+    # don't actually need horizontal margins (the text is centered in the
+    # full screen anyway), so we drop them.
+    is_h_center = style.alignment in (2, 5, 8)
+    eff_ml = 0 if is_h_center else style.margin_l
+    eff_mr = 0 if is_h_center else style.margin_r
+
     # libass opaque-box (BorderStyle=3) renders the background using
     # OutlineColour. Alpha on the box is unreliable across libass builds —
     # the box is always 100% opaque in this mode.
@@ -102,7 +112,7 @@ def write_ass(
         f"Style: Default,{style.font_family},{style.font_size},{primary},"
         f"&H00000000,{outline},{back},{bold},{italic},0,0,100,100,0,0,"
         f"{style.border_style},{border_outline},{style.shadow_offset},"
-        f"{style.alignment},{style.margin_l},{style.margin_r},"
+        f"{style.alignment},{eff_ml},{eff_mr},"
         f"{style.margin_v},1\n\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
@@ -114,9 +124,13 @@ def write_ass(
         # Only sanitisation we need: collapse newlines and escape ASS braces
         # (which would otherwise be parsed as tag overrides).
         text = c.text.replace("\n", " ").replace("{", "(").replace("}", ")")
+        # Belt-and-braces alignment override — keeps libass strictly on the
+        # numpad-position we asked for even if the style line gets parsed
+        # weirdly by some build.
+        prefix = "{\\an" + str(int(style.alignment)) + "}"
         lines.append(
             f"Dialogue: 0,{_format_time(c.start)},{_format_time(c.end)},"
-            f"Default,,0,0,0,,{text}\n"
+            f"Default,,0,0,0,,{prefix}{text}\n"
         )
 
     with open(path, "w", encoding="utf-8") as f:

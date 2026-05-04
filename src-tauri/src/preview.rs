@@ -136,6 +136,15 @@ pub async fn render_styled(
     // 1) Plain frame (cached).
     let frame = extract(video_path.clone(), settings).await?;
 
+    // 1b) Source dimensions — used as PlayResX/Y so the preview burns the
+    //     subtitles at the exact same scale as the real burn-in pipeline
+    //     does (libass uses these for font/margin sizing). Without this
+    //     the preview was at 1920x1080 and a 9:16 source ended up showing
+    //     text 1.5–1.8× larger than what the actual .mp4 contained.
+    let play_res = probe_video_dimensions(&ffmpeg, &video_path)
+        .await
+        .unwrap_or((1920, 1080));
+
     // 2) Cache key includes style + text so any tweak misses the cache and
     //    re-renders, but identical lookups are instant.
     let video_key = cache_key(&video_path)?;
@@ -155,7 +164,7 @@ pub async fn render_styled(
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let ass_path = safe_dir.join(format!("preview-{nonce}.ass"));
-    let ass = build_test_ass(&style, &text);
+    let ass = build_test_ass(&style, &text, play_res.0, play_res.1);
     tokio::fs::write(&ass_path, ass.as_bytes())
         .await
         .context("write test ass")?;
@@ -193,9 +202,7 @@ pub async fn render_styled(
 /// Mini ASS file with a single `Dialogue` line for the test text. Mirrors
 /// `python-sidecar/worker/ass_writer.py` — keep both in sync when changing
 /// style fields. Returns raw ASS contents.
-fn build_test_ass(s: &SubtitleStyle, text: &str) -> String {
-    // Match the prod writer: PlayResY=1080 keeps font sizes consistent across
-    // any source resolution.
+fn build_test_ass(s: &SubtitleStyle, text: &str, play_w: u32, play_h: u32) -> String {
     let primary = hex_to_ass_color(&s.primary_color, 100);
     let bold = if s.bold { -1 } else { 0 };
     let italic = if s.italic { -1 } else { 0 };
@@ -204,6 +211,11 @@ fn build_test_ass(s: &SubtitleStyle, text: &str) -> String {
     } else {
         s.outline_width
     };
+    // Force MarginL/R = 0 for horizontally-centered alignments — libass
+    // sometimes off-centers when those equal values are non-zero.
+    let is_h_center = matches!(s.alignment, 2 | 5 | 8);
+    let eff_ml = if is_h_center { 0 } else { s.margin_l };
+    let eff_mr = if is_h_center { 0 } else { s.margin_r };
     // libass opaque-box (BorderStyle=3) renders the background using
     // OutlineColour. Alpha on the box is unreliable across libass builds —
     // we tested and it didn't work, so the box is always 100% opaque and
@@ -226,8 +238,8 @@ fn build_test_ass(s: &SubtitleStyle, text: &str) -> String {
     format!(
         "[Script Info]\n\
 ScriptType: v4.00+\n\
-PlayResX: 1920\n\
-PlayResY: 1080\n\
+PlayResX: {play_w}\n\
+PlayResY: {play_h}\n\
 WrapStyle: 2\n\
 ScaledBorderAndShadow: yes\n\
 YCbCr Matrix: TV.709\n\n\
@@ -236,7 +248,7 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
 Style: Default,{font},{size},{primary},&H00000000,{outline},{back},{bold},{italic},0,0,100,100,0,0,{border},{outline_w},{shadow},{align},{ml},{mr},{mv},1\n\n\
 [Events]\n\
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n\
-Dialogue: 0,0:00:00.00,0:00:10.00,Default,,0,0,0,,{text}\n",
+Dialogue: 0,0:00:00.00,0:00:10.00,Default,,0,0,0,,{{\\an{align}}}{text}\n",
         font = s.font_family,
         size = s.font_size,
         primary = primary,
@@ -248,10 +260,12 @@ Dialogue: 0,0:00:00.00,0:00:10.00,Default,,0,0,0,,{text}\n",
         outline_w = border_outline,
         shadow = s.shadow_offset,
         align = s.alignment,
-        ml = s.margin_l,
-        mr = s.margin_r,
+        ml = eff_ml,
+        mr = eff_mr,
         mv = s.margin_v,
         text = safe_text,
+        play_w = play_w,
+        play_h = play_h,
     )
 }
 
@@ -274,6 +288,66 @@ fn hex_to_ass_color(hex: &str, alpha_pct: u32) -> String {
 /// without dragging in ffprobe.
 pub async fn probe_duration_public(ffmpeg: &Path, video: &Path) -> Option<f32> {
     probe_duration(ffmpeg, video).await
+}
+
+/// Probe display `WIDTH × HEIGHT` of the first video stream by parsing
+/// FFmpeg's stderr. Storage dimensions come straight from the
+/// `Stream #0:0 ... NNNxMMM` line; we then look for a `displaymatrix:
+/// rotation of X degrees` block (iPhone et al. encode portrait shots as
+/// landscape + 90° rotation tag) and swap if rotation is ±90°/±270° so
+/// the caller gets *display* dimensions, which is what libass expects
+/// for PlayResX/Y.
+pub async fn probe_video_dimensions(ffmpeg: &Path, video: &Path) -> Option<(u32, u32)> {
+    let out = tokio::process::Command::new(ffmpeg)
+        .arg("-hide_banner")
+        .arg("-i")
+        .arg(video)
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    let txt = String::from_utf8_lossy(&out.stderr);
+
+    let mut storage: Option<(u32, u32)> = None;
+    let mut rotation_deg: Option<i32> = None;
+
+    for line in txt.lines() {
+        let lower = line.to_ascii_lowercase();
+        if storage.is_none() && lower.contains("video:") {
+            for tok in line.split_whitespace() {
+                let t = tok.trim_end_matches(',').trim_end_matches(';');
+                if let Some((w, h)) = t.split_once('x') {
+                    if let (Ok(w), Ok(h)) = (w.parse::<u32>(), h.parse::<u32>()) {
+                        // Avoid false positives like "yuv420p" — both sides
+                        // should be sane video dimensions.
+                        if w >= 64 && h >= 64 && w <= 16384 && h <= 16384 {
+                            storage = Some((w, h));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        // FFmpeg prints e.g. "      displaymatrix: rotation of -90.00 degrees"
+        if rotation_deg.is_none() && lower.contains("rotation of") {
+            // Take the number right after "of"
+            if let Some(after) = lower.split("rotation of").nth(1) {
+                let raw = after.trim().split_whitespace().next().unwrap_or("0");
+                if let Ok(deg) = raw.parse::<f32>() {
+                    rotation_deg = Some(deg.round() as i32);
+                }
+            }
+        }
+    }
+
+    let (w, h) = storage?;
+    let rot = rotation_deg.unwrap_or(0).rem_euclid(360);
+    if rot == 90 || rot == 270 {
+        Some((h, w))
+    } else {
+        Some((w, h))
+    }
 }
 
 async fn probe_duration(ffmpeg: &Path, video: &Path) -> Option<f32> {

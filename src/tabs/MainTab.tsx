@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { GlassCard } from "../components/GlassCard";
 import {
   PixelArrowRight,
@@ -11,6 +11,8 @@ import {
 import { usePipeline } from "../state/usePipeline";
 import type { BatchItem } from "../state/usePipeline";
 import { useNavigation } from "../state/navigation";
+import { useModuleDrop } from "../state/useModuleDrop";
+import { listVideosInFolder, VIDEO_EXTS } from "../lib/tauri";
 import {
   getDataDir,
   getSettings,
@@ -18,9 +20,20 @@ import {
   setOutputDir,
 } from "../lib/tauri";
 
+const isVideoPath = (p: string) =>
+  VIDEO_EXTS.some((ext) => p.toLowerCase().endsWith(`.${ext}`));
+
 export default function MainTab() {
-  const { state, browse, browseFolder, reset, reorderBatch, removeFromBatch } =
-    usePipeline();
+  const {
+    state,
+    browse,
+    browseFolder,
+    reset,
+    reorderBatch,
+    removeFromBatch,
+    selectVideo,
+    appendToBatch,
+  } = usePipeline();
   const { goto } = useNavigation();
   const [dataDir, setDataDir] = useState<string | null>(null);
   const [outputDir, setOutputDirState] = useState<string | null>(null);
@@ -63,6 +76,34 @@ export default function MainTab() {
 
   const sidecarReady = state.sidecar?.running ?? false;
   const inBatch = !!state.batch;
+
+  // Drop into Main only when this tab is what the user is looking at.
+  const onDrop = useCallback(
+    async (paths: string[]) => {
+      const videos = paths.filter(isVideoPath);
+      const cur = state;
+      const hasExisting = !!cur.batch || !!cur.videoPath;
+      if (videos.length > 0) {
+        if (hasExisting) {
+          appendToBatch(videos);
+        } else if (videos.length === 1) {
+          await selectVideo(videos[0]);
+        } else {
+          appendToBatch(videos);
+        }
+        return;
+      }
+      // Single dropped path that wasn't a video might be a folder.
+      if (paths.length === 1) {
+        try {
+          const found = await listVideosInFolder(paths[0], false);
+          if (found.length > 0) appendToBatch(found);
+        } catch {/* ignore */}
+      }
+    },
+    [state, appendToBatch, selectVideo],
+  );
+  useModuleDrop("subtitles", onDrop);
   const hasSelection = !!state.videoPath || inBatch;
   const showDropZone = !hasSelection;
   const isRunning = state.phase === "running";

@@ -34,7 +34,16 @@
       "Bash(curl -sLI \"https://github.com/mitsuhaq/subtitle-studio/releases/latest/download/latest.json\")",
       "Bash(git add *)",
       "Bash(git commit *)",
-      "Bash(git tag *)"
+      "Bash(git tag *)",
+      "Bash(git checkout *)",
+      "Bash(git push *)",
+      "Bash(pkill -x \"Zonthor Studio\")",
+      "Bash(pkill -f \"zonthor-studio\")",
+      "Bash(pkill -f \"worker.main\")",
+      "Bash(xargs -r kill)",
+      "Bash(python-sidecar/.venv/bin/python -c \"from worker.chroma_key import run, _chromakey_to_black; print\\('ok'\\)\")",
+      "Bash(git rm *)",
+      "Bash(git reset *)"
     ]
   }
 }

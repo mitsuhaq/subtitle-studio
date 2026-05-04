@@ -40,6 +40,172 @@ const USER_AGENT: &str = "SubtitleStudio/0.1 (+https://github.com/local)";
 pub struct DownloadFlags {
     pub whisper: Arc<AtomicBool>,
     pub ffmpeg: Arc<AtomicBool>,
+    /// Cancellation flags for `EXTRAS` keyed by their `id`. Lazily populated
+    /// the first time each extra is downloaded.
+    pub extras: parking_lot::Mutex<std::collections::HashMap<String, Arc<AtomicBool>>>,
+}
+
+impl DownloadFlags {
+    pub fn extra(&self, id: &str) -> Arc<AtomicBool> {
+        let mut guard = self.extras.lock();
+        guard
+            .entry(id.to_string())
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Generic "extra" components — neural-net models for the non-Subtitles modules.
+// Each one is a single file downloaded from a stable URL into `data/models/<id>/`.
+// Adding a new module is a one-line addition here.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExtraComponentDef {
+    pub id: &'static str,
+    pub name: &'static str,
+    /// Frontend module ids this component unlocks. One model can unlock
+    /// several modules (e.g. RVM serves both CorridorKey and Rotobrush).
+    pub module_ids: &'static [&'static str],
+    /// Direct download URL. Empty string ≡ "not yet available, show as locked".
+    pub url: &'static str,
+    /// Approximate size in bytes for the UI before the HTTP HEAD lands.
+    pub size_bytes_hint: u64,
+    pub filename: &'static str,
+    /// One-line user-facing description shown next to the install button.
+    pub hint: &'static str,
+}
+
+pub const EXTRAS: &[ExtraComponentDef] = &[
+    ExtraComponentDef {
+        id: "rvm",
+        name: "RVM (быстрая)",
+        module_ids: &["corridor_key", "rotobrush"],
+        url: "https://github.com/PeterL1n/RobustVideoMatting/releases/download/v1.0.0/rvm_mobilenetv3_fp32.onnx",
+        size_bytes_hint: 50 * 1024 * 1024,
+        filename: "rvm_mobilenetv3_fp32.onnx",
+        hint: "MobileNetV3 ~50 МБ — быстро, средние края.",
+    },
+    ExtraComponentDef {
+        id: "rvm_hd",
+        name: "RVM HD (качественнее)",
+        module_ids: &["corridor_key", "rotobrush"],
+        url: "https://github.com/PeterL1n/RobustVideoMatting/releases/download/v1.0.0/rvm_resnet50_fp32.onnx",
+        size_bytes_hint: 150 * 1024 * 1024,
+        filename: "rvm_resnet50_fp32.onnx",
+        hint: "ResNet50 ~150 МБ — медленнее, заметно чище края.",
+    },
+    ExtraComponentDef {
+        id: "rnnoise_model",
+        name: "RNNoise (модель шумодава)",
+        module_ids: &["audio_fix"],
+        url: "https://github.com/GregorR/rnnoise-models/raw/master/beguiling-drafter-2018-08-30/bd.rnnn",
+        size_bytes_hint: 90 * 1024,
+        filename: "bd.rnnn",
+        hint: "Модель ~90 КБ для FFmpeg arnndn-фильтра.",
+    },
+    // Eye Contact deliberately omitted from EXTRAS — no production-quality
+    // open-source model exists. The module page itself explains the
+    // situation rather than dangling a "coming soon" download here.
+];
+
+pub fn extra_def(id: &str) -> Option<&'static ExtraComponentDef> {
+    EXTRAS.iter().find(|e| e.id == id)
+}
+
+pub fn extra_dest(id: &str) -> Option<PathBuf> {
+    extra_def(id).map(|e| paths::data_dir().join("models").join(id).join(e.filename))
+}
+
+pub fn extra_status(id: &str) -> ComponentStatus {
+    let Some(path) = extra_dest(id) else {
+        return ComponentStatus {
+            installed: false,
+            path: None,
+            size_bytes: 0,
+            version: None,
+            message: Some(format!("неизвестный компонент: {id}")),
+        };
+    };
+    if path.exists() {
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        ComponentStatus {
+            installed: true,
+            path: Some(path),
+            size_bytes: size,
+            version: None,
+            message: None,
+        }
+    } else {
+        ComponentStatus {
+            installed: false,
+            path: Some(path),
+            size_bytes: 0,
+            version: None,
+            message: None,
+        }
+    }
+}
+
+pub async fn download_extra<R: Runtime>(
+    app: AppHandle<R>,
+    cancel: Arc<AtomicBool>,
+    id: String,
+) -> Result<ComponentStatus> {
+    let def = extra_def(&id)
+        .ok_or_else(|| anyhow!("неизвестный компонент: {id}"))?;
+    if def.url.is_empty() {
+        bail!("Для «{}» ещё не выбрана модель — скоро будет.", def.name);
+    }
+    let dest = extra_dest(&id)
+        .ok_or_else(|| anyhow!("не удалось определить путь для {id}"))?;
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).context("create extras dir")?;
+    }
+    cancel.store(false, Ordering::SeqCst);
+
+    // Routing key for setup://progress events — the frontend maps the
+    // "extra:<id>" prefix back to the corresponding card. Leak is bounded:
+    // one allocation per known extra id over the process lifetime.
+    let component_key: &'static str = leak_str(&format!("extra:{}", def.id));
+    let total_hint = def.size_bytes_hint;
+
+    emit_stage(&app, component_key, "Загрузка", 0, total_hint);
+
+    let client = http_client()?;
+    let app_for_progress = app.clone();
+    let filename = def.filename;
+    stream_to_file(
+        &client,
+        def.url,
+        &dest,
+        &cancel,
+        move |downloaded| {
+            let total = if total_hint > 0 { total_hint } else { downloaded };
+            emit_progress(
+                &app_for_progress,
+                component_key,
+                "Загрузка",
+                Some(filename),
+                downloaded,
+                total,
+                downloaded,
+                total,
+            );
+        },
+    )
+    .await?;
+
+    emit_stage(&app, component_key, "Готово", total_hint, total_hint);
+    Ok(extra_status(&id))
+}
+
+/// Leak a String so we can keep the `&'static str` invariant on
+/// `ProgressPayload::component`. We only call this with a small fixed set of
+/// extra ids, so the leak is bounded and intentional.
+fn leak_str(s: &str) -> &'static str {
+    Box::leak(s.to_string().into_boxed_str())
 }
 
 #[derive(Debug, Clone, Serialize)]
