@@ -94,6 +94,11 @@ RELEASE_URL_BASE="https://github.com/${GH_REPO}/releases/download/${RELEASE_TAG}
 
 if [[ -n "$MAC_SIG" ]]; then
   SIG_CONTENT="$(cat "$MAC_SIG")"
+  # GitHub silently rewrites spaces in uploaded asset filenames to dots
+  # ("Subtitle Studio.app.tar.gz" → "Subtitle.Studio.app.tar.gz"). The URL
+  # in latest.json must match the *served* name, not the local one.
+  TARBALL_BASE="$(basename "$MAC_TARBALL")"
+  ASSET_NAME="${TARBALL_BASE// /.}"
   cat > latest.json <<EOF
 {
   "version": "${APP_VERSION}",
@@ -102,12 +107,12 @@ if [[ -n "$MAC_SIG" ]]; then
   "platforms": {
     "darwin-aarch64": {
       "signature": "${SIG_CONTENT}",
-      "url": "${RELEASE_URL_BASE}/$(basename "$MAC_TARBALL")"
+      "url": "${RELEASE_URL_BASE}/${ASSET_NAME}"
     }
   }
 }
 EOF
-  echo "→ Wrote latest.json for v${APP_VERSION}"
+  echo "→ Wrote latest.json for v${APP_VERSION} (asset: ${ASSET_NAME})"
 else
   echo "⚠ no .app.tar.gz.sig found — latest.json NOT generated"
   echo "  (this only happens if you didn't set TAURI_SIGNING_PRIVATE_KEY_PATH)"

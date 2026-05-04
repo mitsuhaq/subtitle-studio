@@ -28,7 +28,13 @@
       "Bash(kill -9 47713)",
       "Bash(grep -n \"^      </div>\\\\|^    </div>\\\\|^  \\);\\\\|^}$\" \"/Volumes/Crucial X9/Subtitle/src/tabs/StyleTab.tsx\")",
       "Bash(grep -n \"allFinished\\\\|Готово \\\\${doneCount}\" \"/Volumes/Crucial X9/Subtitle/src/tabs/QueueTab.tsx\")",
-      "Bash(chmod +x \"/Volumes/Crucial X9/Subtitle/scripts/release.sh\")"
+      "Bash(chmod +x \"/Volumes/Crucial X9/Subtitle/scripts/release.sh\")",
+      "Bash(curl -sL \"https://api.github.com/repos/mitsuhaq/subtitle-studio/releases/latest\")",
+      "Bash(python3 -c \"import sys,json; r=json.load\\(sys.stdin\\); print\\('tag:', r.get\\('tag_name'\\)\\); print\\('assets:'\\); [print\\(' -', a['name'], '→', a['browser_download_url']\\) for a in r.get\\('assets', []\\)]\")",
+      "Bash(curl -sLI \"https://github.com/mitsuhaq/subtitle-studio/releases/latest/download/latest.json\")",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git tag *)"
     ]
   }
 }
