@@ -43,7 +43,25 @@
       "Bash(xargs -r kill)",
       "Bash(python-sidecar/.venv/bin/python -c \"from worker.chroma_key import run, _chromakey_to_black; print\\('ok'\\)\")",
       "Bash(git rm *)",
-      "Bash(git reset *)"
+      "Bash(git reset *)",
+      "Bash(git merge *)",
+      "Bash(git stash *)",
+      "Bash(SKIP_SIDECAR=1 bash scripts/release.sh)",
+      "Bash(rustc --version)",
+      "Bash(cargo --version)",
+      "Bash(rm -rf ~/.cargo/registry/src/index.crates.io-*/getrandom-*)",
+      "Bash(cargo build *)",
+      "Bash(rustup show *)",
+      "Bash(/usr/bin/which cargo *)",
+      "Read(//usr/local/bin/**)",
+      "Bash(TAURI_SIGNING_PRIVATE_KEY_PASSWORD=\"63350541\" SKIP_SIDECAR=1 bash scripts/release.sh)",
+      "Bash(gh release *)",
+      "Bash(curl -sL \"https://github.com/mitsuhaq/subtitle-studio/releases/latest/download/latest.json\")",
+      "Bash(python3 -c \"import sys,json; r=json.load\\(sys.stdin\\); print\\('tag:', r.get\\('tag_name'\\)\\); [print\\(' -', a['name']\\) for a in r.get\\('assets', []\\)]\")",
+      "Bash(curl -sL \"https://api.github.com/repos/mitsuhaq/subtitle-studio/releases\")",
+      "Bash(python3 -c \"import sys,json; rs=json.load\\(sys.stdin\\); [print\\(r['tag_name'], 'prerelease=' + str\\(r['prerelease']\\), 'draft=' + str\\(r['draft']\\)\\) for r in rs[:3]]\")",
+      "Bash(curl -sL \"https://api.github.com/repos/mitsuhaq/subtitle-studio/releases/tags/v0.2.0\")",
+      "Bash(python3 -c \"import sys,json; r=json.load\\(sys.stdin\\); print\\('draft=', r.get\\('draft'\\), 'prerelease=', r.get\\('prerelease'\\)\\)\")"
     ]
   }
 }

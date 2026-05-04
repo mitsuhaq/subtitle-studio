@@ -32,6 +32,14 @@ OVERRIDE="src-tauri/tauri.release.conf.json"
 
 cd "$ROOT"
 
+# Make sure rustup-managed cargo is on PATH — Homebrew's default `cargo`
+# binary (often 1.72) can't parse edition 2024 manifests pulled in
+# transitively by Tauri.
+if [[ -d "/opt/homebrew/opt/rustup/bin" ]]; then
+  export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
+fi
+echo "→ cargo: $(cargo --version)"
+
 # --- 1. Sidecar binary ------------------------------------------------------
 if [[ -x "$BIN_PATH" && "${SKIP_SIDECAR:-0}" == "1" ]]; then
   echo "→ Reusing existing sidecar binary at $BIN_PATH (SKIP_SIDECAR=1)"

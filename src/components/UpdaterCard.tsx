@@ -79,6 +79,9 @@ export function UpdaterCard() {
           <h3 className="text-base font-semibold text-zinc-100 flex items-center gap-2">
             <PixelSparkles size={14} className="text-gold-300" />
             Обновления
+            <span className="text-[9px] text-zinc-600 font-normal tracking-wide ml-1">
+              powered by Василий Верстак
+            </span>
           </h3>
           <p className="text-sm text-zinc-400 mt-1">
             Текущая версия:{" "}

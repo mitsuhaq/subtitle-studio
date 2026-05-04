@@ -1,6 +1,6 @@
 [package]
 name = "zonthor-studio"
-version = "0.2.0"
+version = "0.2.1"
 description = "Zonthor Studio — portable multimedia toolkit (subtitles, chroma key, eye contact, audio fix)"
 edition = "2021"
 rust-version = "1.77"
