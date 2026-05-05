@@ -1,7 +1,4 @@
-import { useEffect, useState } from "react";
-import { check, type Update } from "@tauri-apps/plugin-updater";
-import { relaunch } from "@tauri-apps/plugin-process";
-import { getVersion } from "@tauri-apps/api/app";
+import { useUpdater } from "../state/updater";
 import { GlassCard } from "./GlassCard";
 import { ProgressBar } from "./ProgressBar";
 import {
@@ -12,65 +9,17 @@ import {
   PixelX,
 } from "./icons";
 
-type Phase = "idle" | "checking" | "ready" | "downloading" | "installed" | "uptodate" | "error";
-
 export function UpdaterCard() {
-  const [phase, setPhase] = useState<Phase>("idle");
-  const [current, setCurrent] = useState<string>("…");
-  const [update, setUpdate] = useState<Update | null>(null);
-  const [downloaded, setDownloaded] = useState(0);
-  const [total, setTotal] = useState(0);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    getVersion()
-      .then(setCurrent)
-      .catch(() => setCurrent("?"));
-  }, []);
-
-  const doCheck = async () => {
-    setError(null);
-    setUpdate(null);
-    setPhase("checking");
-    try {
-      const u = await check();
-      if (!u) {
-        setPhase("uptodate");
-        return;
-      }
-      setUpdate(u);
-      setPhase("ready");
-    } catch (e) {
-      setError(formatErr(e));
-      setPhase("error");
-    }
-  };
-
-  const doInstall = async () => {
-    if (!update) return;
-    setError(null);
-    setDownloaded(0);
-    setTotal(0);
-    setPhase("downloading");
-    try {
-      await update.downloadAndInstall((event) => {
-        // tauri-plugin-updater fires "Started → Progress* → Finished"
-        if (event.event === "Started") {
-          setTotal(event.data.contentLength ?? 0);
-          setDownloaded(0);
-        } else if (event.event === "Progress") {
-          setDownloaded((d) => d + event.data.chunkLength);
-        } else if (event.event === "Finished") {
-          setPhase("installed");
-        }
-      });
-      // Restart so the new binary picks up.
-      await relaunch();
-    } catch (e) {
-      setError(formatErr(e));
-      setPhase("error");
-    }
-  };
+  const {
+    phase,
+    current,
+    update,
+    downloaded,
+    total,
+    error,
+    manualCheck,
+    install,
+  } = useUpdater();
 
   return (
     <GlassCard>
@@ -94,6 +43,9 @@ export function UpdaterCard() {
               </>
             )}
           </p>
+          <p className="text-[11px] text-zinc-500 mt-1">
+            Проверка идёт автоматически при запуске и каждый час.
+          </p>
           {update?.body && (
             <pre className="mt-2 text-[11px] text-zinc-400 whitespace-pre-wrap max-h-32 overflow-auto bg-white/[0.03] border border-white/[0.05] rounded p-2">
               {update.body}
@@ -105,7 +57,7 @@ export function UpdaterCard() {
             phase === "uptodate" ||
             phase === "error" ||
             phase === "installed") && (
-            <button className="btn-ghost" onClick={doCheck}>
+            <button className="btn-ghost" onClick={manualCheck}>
               <PixelRefresh size={16} />
               Проверить
             </button>
@@ -116,7 +68,7 @@ export function UpdaterCard() {
             </button>
           )}
           {phase === "ready" && (
-            <button className="btn-primary" onClick={doInstall}>
+            <button className="btn-primary" onClick={install}>
               <PixelDownload size={16} />
               Установить
             </button>
@@ -166,11 +118,6 @@ export function UpdaterCard() {
       )}
     </GlassCard>
   );
-}
-
-function formatErr(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  return String(e);
 }
 
 function formatBytes(b: number): string {

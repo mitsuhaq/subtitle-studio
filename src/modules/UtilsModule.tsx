@@ -27,6 +27,7 @@ import {
 import type { UtilProgress, UtilResult } from "../lib/tauri";
 import { useModuleDrop } from "../state/useModuleDrop";
 import { OutputDirCard } from "../components/OutputDirCard";
+import { TimecodePicker, formatTimecode } from "../components/TimecodePicker";
 
 const isVideoPath = (p: string) =>
   VIDEO_EXTS.some((ext) => p.toLowerCase().endsWith(`.${ext}`));
@@ -421,37 +422,59 @@ function TrimPanel({
   onEnd: (n: number) => void;
   multiple: boolean;
 }) {
+  // Slider step (10 ms) matches the Timecode picker's centisecond precision,
+  // so dragging and typing snap to the same grid.
+  const STEP = 0.01;
+  const safeMax = Math.max(STEP, duration);
   return (
-    <div className="grid gap-3">
+    <div className="grid gap-4">
       {multiple && (
         <div className="text-[11px] text-zinc-500">
           Тайминг применится одинаково ко всем файлам в очереди.
         </div>
       )}
-      <Row label={`Начало · ${formatTime(start)}`}>
+      <Row label="Начало">
+        <TimecodePicker
+          value={start}
+          onChange={(v) => {
+            const next = Math.min(Math.max(0, v), Math.max(0, end - STEP));
+            onStart(next);
+          }}
+          max={Math.max(0, end - STEP)}
+          disabled={duration === 0}
+        />
         <input
           type="range"
           min={0}
-          max={Math.max(0.1, duration)}
-          step={0.1}
+          max={safeMax}
+          step={STEP}
           value={start}
           onChange={(e) => {
-            const v = Math.min(Number(e.target.value), end - 0.1);
+            const v = Math.min(Number(e.target.value), end - STEP);
             onStart(v);
           }}
           disabled={duration === 0}
           className="flex-1 accent-gold-500 disabled:opacity-50"
         />
       </Row>
-      <Row label={`Конец · ${formatTime(end)}`}>
+      <Row label="Конец">
+        <TimecodePicker
+          value={end}
+          onChange={(v) => {
+            const next = Math.max(Math.min(duration, v), start + STEP);
+            onEnd(next);
+          }}
+          max={duration}
+          disabled={duration === 0}
+        />
         <input
           type="range"
           min={0}
-          max={Math.max(0.1, duration)}
-          step={0.1}
+          max={safeMax}
+          step={STEP}
           value={end}
           onChange={(e) => {
-            const v = Math.max(Number(e.target.value), start + 0.1);
+            const v = Math.max(Number(e.target.value), start + STEP);
             onEnd(v);
           }}
           disabled={duration === 0}
@@ -460,7 +483,8 @@ function TrimPanel({
       </Row>
       {duration > 0 && (
         <div className="text-[11px] text-zinc-500">
-          Длительность: {formatTime(duration)} · Останется: {formatTime(Math.max(0, end - start))}
+          Длительность: {formatTimecode(duration)} · Останется:{" "}
+          {formatTimecode(Math.max(0, end - start))}
         </div>
       )}
     </div>

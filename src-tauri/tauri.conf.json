@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Zonthor Studio",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "identifier": "com.zonthor.studio",
   "build": {
     "frontendDist": "../dist",
@@ -45,6 +45,10 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "resources": [
+      "assets/ambient/*.opus",
+      "assets/ir/*.wav"
     ],
     "macOS": {
       "minimumSystemVersion": "11.0"

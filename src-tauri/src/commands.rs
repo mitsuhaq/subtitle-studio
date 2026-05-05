@@ -417,16 +417,50 @@ pub async fn util_overlay<R: Runtime>(
 
 // ---------------------------------------------------------------------------
 // Audio Fix module — pure FFmpeg pipeline. RNNoise via the `arnndn` filter
-// for noise suppression + EBU R128 `loudnorm` for level normalization. No
-// Python sidecar involvement at all.
+// for noise suppression + 2-pass peak normalization (astats → volume) for
+// level normalization. We chose peak dBFS (not loudnorm/LUFS) so the dial
+// matches what After Effects, Premiere, and Audition show — same -6 dB in
+// our app == -6 dB peak in those tools, no mental conversion needed.
 // ---------------------------------------------------------------------------
 
 #[derive(serde::Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 pub struct AudioFixOptions {
     pub denoise: bool,
+    /// Whether to renormalize peak level to `target_db_peak`.
     pub loudnorm: bool,
-    pub target_lufs: f32, // typical: -16 (streaming), -23 (broadcast)
+    /// Target peak in dBFS (-30..0). Common values: -3 (online), -1 (broadcast safety).
+    /// Field stays named `target_lufs` for backwards-compat in saved settings,
+    /// even though the unit is now peak dBFS.
+    pub target_lufs: f32,
+
+    /// Bundled ambient preset id ("room_tone" / "pink_room" / "white_air" /
+    /// "ac_hum" / "distant_rumble") to mix under the dialogue. Mutually
+    /// exclusive with `ambient_custom_path` — UI sends one or neither.
+    #[serde(default)]
+    pub ambient_preset: Option<String>,
+    /// User-supplied ambient track (any audio/video file ffmpeg can read).
+    #[serde(default)]
+    pub ambient_custom_path: Option<PathBuf>,
+    /// Ambient gain in dB (typical -30..-10). Ignored if no ambient source.
+    #[serde(default = "default_ambient_db")]
+    pub ambient_level_db: f32,
+
+    /// Bundled IR preset id for room reverb ("hall" / "cathedral" / "studio"
+    /// / "stage" / "outdoor"). `None` = no reverb.
+    #[serde(default)]
+    pub room_preset: Option<String>,
+    /// Wet/dry mix in percent (0 = bypass, 100 = full reverb). 25-40 is
+    /// usually pleasant for speech.
+    #[serde(default = "default_room_wet")]
+    pub room_wet_pct: f32,
+}
+
+fn default_ambient_db() -> f32 {
+    -20.0
+}
+fn default_room_wet() -> f32 {
+    30.0
 }
 
 #[derive(serde::Serialize)]
@@ -458,7 +492,7 @@ pub async fn audio_fix_run<R: Runtime>(
     options: AudioFixOptions,
     settings: State<'_, SettingsStore>,
 ) -> Result<AudioFixResult, String> {
-    use tauri::Emitter;
+    use tauri::{Emitter, Manager};
     use tokio::io::AsyncBufReadExt;
 
     if !video_path.exists() {
@@ -470,8 +504,59 @@ pub async fn audio_fix_run<R: Runtime>(
         .clone()
         .ok_or_else(|| "FFmpeg не установлен — Setup".to_string())?;
 
-    // Build the audio filter chain. Empty = passthrough.
-    let mut filters: Vec<String> = Vec::new();
+    // ---- Resolve optional auxiliary inputs (ambient, IR) -----------------
+    // Each tuple is (label, path) — ffmpeg gets these as additional `-i`s
+    // and we wire them into the filter graph by index.
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("resource_dir: {e}"))?;
+    let mut extra_inputs: Vec<PathBuf> = Vec::new();
+
+    let ambient_path = if let Some(custom) = options.ambient_custom_path.clone() {
+        if !custom.exists() {
+            return Err(format!("Ambient-файл не найден: {}", custom.display()));
+        }
+        Some(custom)
+    } else if let Some(preset) = options.ambient_preset.as_deref() {
+        let p = resource_dir
+            .join("assets")
+            .join("ambient")
+            .join(format!("{preset}.opus"));
+        if !p.exists() {
+            return Err(format!("Ambient-пресет '{preset}' не найден в бандле"));
+        }
+        Some(p)
+    } else {
+        None
+    };
+    let ambient_input_idx = ambient_path.as_ref().map(|p| {
+        extra_inputs.push(p.clone());
+        // First aux input is index 1 (main video is 0), so 1 + (extra_inputs.len() - 1).
+        extra_inputs.len()
+    });
+
+    let room_path = if let Some(preset) = options.room_preset.as_deref() {
+        let p = resource_dir
+            .join("assets")
+            .join("ir")
+            .join(format!("{preset}.wav"));
+        if !p.exists() {
+            return Err(format!("Room-пресет '{preset}' не найден в бандле"));
+        }
+        Some(p)
+    } else {
+        None
+    };
+    let room_input_idx = room_path.as_ref().map(|p| {
+        extra_inputs.push(p.clone());
+        extra_inputs.len()
+    });
+
+    // ---- Build the filter graph -----------------------------------------
+    // The cheap path (no ambient, no room) stays on the simple `-af` chain;
+    // anything with extra inputs goes through `-filter_complex`.
+    let mut chain: Vec<String> = Vec::new();
     if options.denoise {
         let model = setup::extra_dest("rnnoise_model").ok_or_else(|| {
             "Не нашёл путь к модели RNNoise".to_string()
@@ -481,19 +566,28 @@ pub async fn audio_fix_run<R: Runtime>(
                 "Модель RNNoise не установлена — поставьте её в Setup.".to_string(),
             );
         }
-        // FFmpeg's filter parser also strips backslashes — wrap the path
-        // in single quotes after escaping any embedded `'`.
         let path_safe = model.to_string_lossy().replace('\'', "\\'");
-        filters.push(format!("arnndn=m='{path_safe}'"));
+        chain.push(format!("arnndn=m='{path_safe}'"));
     }
     if options.loudnorm {
-        let lufs = options.target_lufs.clamp(-50.0, -5.0);
-        filters.push(format!("loudnorm=I={lufs}:TP=-1.5:LRA=11"));
+        let target = options.target_lufs.clamp(-30.0, 0.0);
+        let measured = measure_peak_dbfs(&ffmpeg, &video_path)
+            .await
+            .map_err(|e| format!("не удалось измерить пик: {e}"))?;
+        let gain = target - measured;
+        log::info!(
+            "audio_fix peak normalize: measured={measured:.2} dBFS, target={target:.2} dBFS, gain={gain:+.2} dB"
+        );
+        chain.push(format!("volume={gain:.2}dB"));
     }
-    if filters.is_empty() {
+
+    let any_op = options.denoise
+        || options.loudnorm
+        || ambient_input_idx.is_some()
+        || room_input_idx.is_some();
+    if !any_op {
         return Err("Включите хотя бы одну операцию.".to_string());
     }
-    let af = filters.join(",");
 
     // Output: per-module override → otherwise next to source.
     let stem = video_path
@@ -522,20 +616,82 @@ pub async fn audio_fix_run<R: Runtime>(
         serde_json::json!({ "stage": "Кодирование", "pos": 0.0, "total": total_ms as f64 / 1000.0 }),
     );
 
-    let mut child = tokio::process::Command::new(&ffmpeg)
-        .arg("-y")
+    // ---- Compose ffmpeg invocation --------------------------------------
+    let mut cmd = tokio::process::Command::new(&ffmpeg);
+    cmd.arg("-y")
         .arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")
         .arg("-i")
-        .arg(&video_path)
-        .args(["-af", &af])
-        .args(["-c:v", "copy", "-c:a", "aac", "-b:a", "192k"])
+        .arg(&video_path);
+    for p in &extra_inputs {
+        cmd.arg("-i").arg(p);
+    }
+
+    if extra_inputs.is_empty() {
+        // Simple path: single audio chain via -af.
+        cmd.args(["-af", &chain.join(",")]);
+    } else {
+        // Complex path: build a filter_complex that:
+        //   a) runs the dialogue chain on [0:a]               → [a0]
+        //   b) loops the ambient and trims to total length    → [amb]
+        //   c) amix's [a0] + [amb] (if ambient is present)    → [mix]
+        //   d) feeds [mix] (or [a0]) + [ir:a] into afir       → [out]
+        let dur_s = (total_ms as f32 / 1000.0).max(0.1);
+        let mut graph: Vec<String> = Vec::new();
+
+        // Stage A — dialogue chain. If empty, just relabel.
+        let dialogue_chain = if chain.is_empty() {
+            "anull".to_string()
+        } else {
+            chain.join(",")
+        };
+        graph.push(format!("[0:a]{dialogue_chain}[a0]"));
+
+        // Stage B+C — ambient mix. amix=duration=first keeps the dialogue
+        // length authoritative even though the ambient is looped longer.
+        let mut last_label = "a0".to_string();
+        if let Some(idx) = ambient_input_idx {
+            let amb_db = options.ambient_level_db.clamp(-50.0, 6.0);
+            // aloop with size in samples — pick a value larger than any
+            // sane video (1e9 samples ≈ 6 hours at 48 kHz).
+            graph.push(format!(
+                "[{idx}:a]aloop=loop=-1:size=999999999,atrim=0:{dur_s},asetpts=N/SR/TB,volume={amb_db:.2}dB[amb]"
+            ));
+            graph.push(format!(
+                "[{last_label}][amb]amix=inputs=2:duration=first:dropout_transition=0,volume=2.0[mix]"
+            ));
+            last_label = "mix".to_string();
+        }
+
+        // Stage D — convolution reverb via afir.
+        if let Some(idx) = room_input_idx {
+            let wet = options.room_wet_pct.clamp(0.0, 100.0);
+            let dry = (100.0 - wet).max(0.0);
+            // afir takes the dialogue as the first input and the IR as the
+            // second; `wet`/`dry` are linear gains expressed as 0..10
+            // (per the filter docs). We map 0..100 % → 0..10.
+            graph.push(format!(
+                "[{last_label}][{idx}:a]afir=dry={:.2}:wet={:.2}:length=1:irnorm=1[out]",
+                dry / 10.0,
+                wet / 10.0,
+            ));
+            last_label = "out".to_string();
+        }
+
+        let filter_complex = graph.join(";");
+        log::info!("audio_fix filter_complex: {filter_complex}");
+        cmd.args(["-filter_complex", &filter_complex, "-map", "0:v?", "-map", &format!("[{last_label}]")]);
+    }
+
+    cmd.args(["-c:v", "copy", "-c:a", "aac", "-b:a", "192k"])
         .args(["-progress", "pipe:2"])
         .arg(&out_path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("ffmpeg spawn failed: {e}"))?;
 
@@ -1079,4 +1235,58 @@ fn open_in_file_manager(path: &std::path::Path) -> std::io::Result<()> {
     #[cfg(all(unix, not(target_os = "macos")))]
     let result = std::process::Command::new("xdg-open").arg(path).status();
     result.map(|_| ())
+}
+
+/// Run ffmpeg with `astats` over the file's audio stream and parse the
+/// overall peak level out of stderr. Returns peak in dBFS (always ≤ 0).
+///
+/// We pipe to a null muxer so the run is decode-only — fast even for
+/// hour-long files (no encoding, no disk write). The interesting line
+/// looks like `[Parsed_astats_0 @ ...] Peak level dB: -1.205432`.
+/// `astats` emits Peak level for each channel and once more in the
+/// "Overall" trailer; we keep the *last* match so we get the overall
+/// peak across all channels rather than just channel 0.
+async fn measure_peak_dbfs(
+    ffmpeg: &std::path::Path,
+    video: &std::path::Path,
+) -> anyhow::Result<f32> {
+    use anyhow::{anyhow, Context};
+    let out = tokio::process::Command::new(ffmpeg)
+        .arg("-hide_banner")
+        .arg("-nostats")
+        .arg("-i")
+        .arg(video)
+        .args([
+            "-map", "0:a:0",
+            "-af", "astats=measure_overall=Peak_level:measure_perchannel=0",
+            "-f", "null",
+            "-",
+        ])
+        .output()
+        .await
+        .context("spawn ffmpeg astats")?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    let mut last_peak: Option<f32> = None;
+    for line in stderr.lines() {
+        if let Some(idx) = line.find("Peak level dB:") {
+            let rest = line[idx + "Peak level dB:".len()..].trim();
+            if let Some(tok) = rest.split_whitespace().next() {
+                // ffmpeg writes "-inf" for total silence; treat it as a
+                // very low peak so the gain math still produces a sane
+                // (though large) volume bump rather than NaN.
+                if tok.eq_ignore_ascii_case("-inf") {
+                    last_peak = Some(-120.0);
+                } else if let Ok(v) = tok.parse::<f32>() {
+                    last_peak = Some(v);
+                }
+            }
+        }
+    }
+    last_peak.ok_or_else(|| {
+        anyhow!(
+            "не нашёл Peak level в выводе ffmpeg (есть ли вообще аудиодорожка?)\n--- stderr ---\n{}",
+            stderr.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")
+        )
+    })
 }

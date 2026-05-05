@@ -130,10 +130,37 @@ export const chromaKeyCancel = () => invoke<void>("chroma_key_cancel");
 // Audio Fix
 // ---------------------------------------------------------------------------
 
+export type AmbientPreset =
+  | "room_tone"
+  | "pink_room"
+  | "white_air"
+  | "ac_hum"
+  | "distant_rumble";
+
+export type RoomPreset =
+  | "hall"
+  | "cathedral"
+  | "studio"
+  | "stage"
+  | "outdoor";
+
 export interface AudioFixOptions {
   denoise: boolean;
   loudnorm: boolean;
+  /** Peak target in dBFS (-30..0). Field name kept for backwards-compat. */
   target_lufs: number;
+
+  /** Bundled ambient preset id, or null for none. */
+  ambient_preset?: AmbientPreset | null;
+  /** Custom ambient file (overrides the preset if both are set). */
+  ambient_custom_path?: string | null;
+  /** Ambient gain in dB. Sane range -40..0. */
+  ambient_level_db?: number;
+
+  /** Bundled room IR preset id, or null for none. */
+  room_preset?: RoomPreset | null;
+  /** Wet/dry mix percentage, 0..100. 0 = dry only. */
+  room_wet_pct?: number;
 }
 
 export interface AudioFixResult {
@@ -434,6 +461,19 @@ export async function pickVideoFile(): Promise<string | null> {
     multiple: false,
     directory: false,
     filters: [{ name: "Видео", extensions: [...VIDEO_EXTS] }],
+  });
+  if (!result) return null;
+  return Array.isArray(result) ? (result[0] ?? null) : result;
+}
+
+export async function pickAudioFile(): Promise<string | null> {
+  const result = await openDialog({
+    title: "Выберите аудио",
+    multiple: false,
+    directory: false,
+    filters: [
+      { name: "Аудио", extensions: ["mp3", "wav", "m4a", "aac", "ogg", "opus", "flac", "wma"] },
+    ],
   });
   if (!result) return null;
   return Array.isArray(result) ? (result[0] ?? null) : result;

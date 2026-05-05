@@ -20,14 +20,17 @@ import {
   audioFixRun,
   notify,
   onAudioFixProgress,
+  pickAudioFile,
   pickVideoFile,
   revealInShell,
   VIDEO_EXTS,
 } from "../lib/tauri";
 import type {
+  AmbientPreset,
   AudioFixOptions,
   AudioFixProgress,
   AudioFixResult,
+  RoomPreset,
 } from "../lib/tauri";
 
 const isVideoPath = (p: string) =>
@@ -35,10 +38,29 @@ const isVideoPath = (p: string) =>
 
 type Phase = "idle" | "running" | "done" | "error" | "cancelled";
 
-const LUFS_PRESETS: { label: string; value: number; hint: string }[] = [
-  { label: "Стриминг (-16)", value: -16, hint: "YouTube/Spotify" },
-  { label: "Подкаст (-19)", value: -19, hint: "Apple Podcasts" },
-  { label: "ТВ (-23)", value: -23, hint: "EBU R128 broadcast" },
+// Peak dBFS targets (not LUFS). Same scale that After Effects / Premiere
+// show on their meters, so the value the user picks here is exactly what
+// they'd read off their NLE's audio panel after rendering.
+const PEAK_PRESETS: { label: string; value: number; hint: string }[] = [
+  { label: "Голос (−1 dB)", value: -1, hint: "Громко, на грани клиппинга" },
+  { label: "Онлайн (−3 dB)", value: -3, hint: "Стандарт для YouTube/соцсетей" },
+  { label: "С хедрумом (−6 dB)", value: -6, hint: "Запас под последующий мастеринг" },
+];
+
+const AMBIENT_PRESETS: { id: AmbientPreset; label: string; hint: string }[] = [
+  { id: "room_tone", label: "Комната", hint: "Лёгкий гул пустой комнаты (brown noise)" },
+  { id: "pink_room", label: "Студия", hint: "Розовый шум — нейтральный фон" },
+  { id: "white_air", label: "Шипение", hint: "Белый шум — лёгкое 'воздушное' шипение" },
+  { id: "ac_hum", label: "Кондиционер", hint: "Низкочастотный гул вентиляции" },
+  { id: "distant_rumble", label: "Дальний гул", hint: "Очень низкий городской фон" },
+];
+
+const ROOM_PRESETS: { id: RoomPreset; label: string; hint: string }[] = [
+  { id: "studio", label: "Студия", hint: "Короткое затухание — ~0.4 с" },
+  { id: "stage", label: "Сцена", hint: "Средняя комната — ~1 с" },
+  { id: "hall", label: "Зал", hint: "Большой зал — ~2.5 с" },
+  { id: "cathedral", label: "Собор", hint: "Очень длинный реверб — ~4 с" },
+  { id: "outdoor", label: "Улица", hint: "Короткий с поглощением высоких" },
 ];
 
 export default function AudioFixModule() {
@@ -53,7 +75,20 @@ function AudioFixInner() {
   const [videoPath, setVideoPath] = useState<string | null>(null);
   const [denoise, setDenoise] = useState(true);
   const [loudnorm, setLoudnorm] = useState(true);
-  const [targetLufs, setTargetLufs] = useState(-16);
+  // Default peak target -3 dBFS — broadcast-safe and the de-facto standard
+  // for YouTube/Instagram uploads. Users coming from AE/Premiere will see
+  // exactly this number on their VU meters.
+  const [targetLufs, setTargetLufs] = useState(-3);
+
+  // Ambient overlay: bundled preset XOR custom file. `null` on both = off.
+  const [ambientPreset, setAmbientPreset] = useState<AmbientPreset | null>(null);
+  const [ambientCustomPath, setAmbientCustomPath] = useState<string | null>(null);
+  const [ambientLevelDb, setAmbientLevelDb] = useState(-20);
+
+  // Room reverb: one of the bundled IR presets, or null = bypass.
+  const [roomPreset, setRoomPreset] = useState<RoomPreset | null>(null);
+  const [roomWetPct, setRoomWetPct] = useState(30);
+
   const [phase, setPhase] = useState<Phase>("idle");
   const [progress, setProgress] = useState<AudioFixProgress | null>(null);
   const [result, setResult] = useState<AudioFixResult | null>(null);
@@ -78,8 +113,11 @@ function AudioFixInner() {
   }, []);
 
   const elapsed = useElapsed(phase === "running");
+  const ambientEnabled = ambientPreset !== null || ambientCustomPath !== null;
   const canRun =
-    !!videoPath && phase !== "running" && (denoise || loudnorm);
+    !!videoPath &&
+    phase !== "running" &&
+    (denoise || loudnorm || ambientEnabled || roomPreset !== null);
 
   const run = async () => {
     if (!videoPath) return;
@@ -91,6 +129,11 @@ function AudioFixInner() {
       denoise,
       loudnorm,
       target_lufs: targetLufs,
+      ambient_preset: ambientCustomPath ? null : ambientPreset,
+      ambient_custom_path: ambientCustomPath,
+      ambient_level_db: ambientLevelDb,
+      room_preset: roomPreset,
+      room_wet_pct: roomWetPct,
     };
     try {
       const r = await audioFixRun(videoPath, opts);
@@ -128,8 +171,9 @@ function AudioFixInner() {
               Audio Fix — шумодав и нормализация громкости
             </h1>
             <p className="text-sm text-zinc-400 mt-1 max-w-md">
-              RNNoise убирает фоновый шум, EBU R128 loudnorm выравнивает уровень
-              под платформу. Видео остаётся без изменений (поток копируется).
+              RNNoise убирает фоновый шум. Нормализация поднимает пик до
+              указанного уровня в dBFS — шкала совпадает с After Effects /
+              Premiere. Видео-поток копируется как есть.
             </p>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
@@ -206,16 +250,16 @@ function AudioFixInner() {
           <Toggle
             checked={loudnorm}
             onChange={setLoudnorm}
-            label="Нормализация громкости (EBU R128)"
-            hint="Выравнивает средний уровень под выбранную платформу."
+            label="Нормализация громкости (peak dBFS)"
+            hint="Поднимает пик аудио до указанного уровня — те же цифры что в After Effects."
           />
 
           {loudnorm && (
             <div className="ml-6 mt-1 grid gap-3">
               <div className="flex items-center justify-between">
-                <span className="text-[11px] text-zinc-500">Целевой уровень</span>
+                <span className="text-[11px] text-zinc-500">Целевой пик</span>
                 <span className="text-[11px] text-gold-200/90 tabular-nums">
-                  {targetLufs.toFixed(1)} LUFS
+                  {targetLufs.toFixed(1)} dBFS
                 </span>
               </div>
 
@@ -223,7 +267,7 @@ function AudioFixInner() {
                 <input
                   type="range"
                   min={-30}
-                  max={-6}
+                  max={0}
                   step={0.5}
                   value={targetLufs}
                   onChange={(e) => setTargetLufs(Number(e.target.value))}
@@ -232,7 +276,7 @@ function AudioFixInner() {
                 <input
                   type="number"
                   min={-30}
-                  max={-6}
+                  max={0}
                   step={0.5}
                   value={targetLufs}
                   onChange={(e) => {
@@ -244,7 +288,7 @@ function AudioFixInner() {
               </div>
 
               <div className="flex items-center gap-2 flex-wrap">
-                {LUFS_PRESETS.map((p) => (
+                {PEAK_PRESETS.map((p) => (
                   <button
                     key={p.value}
                     type="button"
@@ -261,13 +305,36 @@ function AudioFixInner() {
                 ))}
               </div>
               <div className="text-[10px] text-zinc-600">
-                Тише = ниже число (−30 = очень тихо · −6 = почти максимум, риск
-                клиппинга). EBU-стандарт −23, стриминг обычно −16…−14.
+                0 dBFS = цифровой максимум (клиппинг). −1…−3 — нормально для
+                публикации. −6 оставляет запас под мастеринг. Шкала идентична
+                индикатору пика в AE / Premiere.
               </div>
             </div>
           )}
         </div>
       </GlassCard>
+
+      <AmbientCard
+        preset={ambientPreset}
+        setPreset={(p) => {
+          setAmbientPreset(p);
+          if (p) setAmbientCustomPath(null);
+        }}
+        customPath={ambientCustomPath}
+        setCustomPath={(p) => {
+          setAmbientCustomPath(p);
+          if (p) setAmbientPreset(null);
+        }}
+        levelDb={ambientLevelDb}
+        setLevelDb={setAmbientLevelDb}
+      />
+
+      <RoomCard
+        preset={roomPreset}
+        setPreset={setRoomPreset}
+        wetPct={roomWetPct}
+        setWetPct={setRoomWetPct}
+      />
 
       {phase === "running" && (
         <GlassCard>
@@ -408,4 +475,193 @@ function formatTime(seconds: number): string {
   const m = Math.floor(total / 60);
   const s = total % 60;
   return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function AmbientCard({
+  preset,
+  setPreset,
+  customPath,
+  setCustomPath,
+  levelDb,
+  setLevelDb,
+}: {
+  preset: AmbientPreset | null;
+  setPreset: (p: AmbientPreset | null) => void;
+  customPath: string | null;
+  setCustomPath: (p: string | null) => void;
+  levelDb: number;
+  setLevelDb: (db: number) => void;
+}) {
+  const enabled = preset !== null || customPath !== null;
+  return (
+    <GlassCard>
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
+          <PixelSparkles size={14} className="text-gold-300" />
+          Подмешать фон
+        </h2>
+        {enabled && (
+          <button
+            type="button"
+            onClick={() => {
+              setPreset(null);
+              setCustomPath(null);
+            }}
+            className="text-[11px] text-zinc-500 hover:text-zinc-200"
+          >
+            Выключить
+          </button>
+        )}
+      </div>
+      <p className="text-[11px] text-zinc-500 mb-3">
+        Лёгкий ambient под голос — оживляет «стерильную» запись. Все встроенные
+        пресеты — синтетический шум, для реалистичной толпы или музея кидайте
+        свой файл.
+      </p>
+
+      <div className="grid grid-cols-3 gap-1.5 mb-3">
+        {AMBIENT_PRESETS.map((p) => (
+          <button
+            key={p.id}
+            type="button"
+            title={p.hint}
+            onClick={() => setPreset(preset === p.id ? null : p.id)}
+            className={`px-2 py-1.5 rounded border text-[11px] transition-colors ${
+              preset === p.id
+                ? "border-gold-500/60 bg-gold-500/15 text-gold-200"
+                : "border-white/10 bg-white/[0.02] text-zinc-300 hover:border-gold-500/30"
+            }`}
+          >
+            {p.label}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex items-center gap-2 mb-3">
+        <button
+          className="btn-ghost"
+          onClick={async () => {
+            const p = await pickAudioFile();
+            if (p) setCustomPath(p);
+          }}
+        >
+          <PixelFolder size={14} />
+          {customPath ? "Заменить файл" : "Свой файл"}
+        </button>
+        {customPath && (
+          <>
+            <code className="flex-1 min-w-0 text-[11px] text-gold-200/80 break-all truncate">
+              {customPath}
+            </code>
+            <button
+              type="button"
+              onClick={() => setCustomPath(null)}
+              className="text-zinc-500 hover:text-red-300"
+            >
+              <PixelX size={12} />
+            </button>
+          </>
+        )}
+      </div>
+
+      {enabled && (
+        <div className="grid gap-2">
+          <div className="flex items-center justify-between text-[11px]">
+            <span className="text-zinc-500">Уровень фона</span>
+            <span className="text-gold-200/90 tabular-nums">
+              {levelDb.toFixed(0)} dB
+            </span>
+          </div>
+          <input
+            type="range"
+            min={-40}
+            max={0}
+            step={1}
+            value={levelDb}
+            onChange={(e) => setLevelDb(Number(e.target.value))}
+            className="w-full accent-gold-500"
+          />
+          <div className="text-[10px] text-zinc-600">
+            −20 dB — обычно достаточно, чтобы фон был слышен но не мешал голосу.
+          </div>
+        </div>
+      )}
+    </GlassCard>
+  );
+}
+
+function RoomCard({
+  preset,
+  setPreset,
+  wetPct,
+  setWetPct,
+}: {
+  preset: RoomPreset | null;
+  setPreset: (p: RoomPreset | null) => void;
+  wetPct: number;
+  setWetPct: (v: number) => void;
+}) {
+  return (
+    <GlassCard>
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
+          <PixelSparkles size={14} className="text-gold-300" />
+          Реверб «комнаты»
+        </h2>
+        {preset && (
+          <button
+            type="button"
+            onClick={() => setPreset(null)}
+            className="text-[11px] text-zinc-500 hover:text-zinc-200"
+          >
+            Выключить
+          </button>
+        )}
+      </div>
+      <p className="text-[11px] text-zinc-500 mb-3">
+        Имитация акустики помещения через свёрточный реверб. Подходит когда надо
+        «вписать» сухой голос в более живой пространственный микс.
+      </p>
+
+      <div className="grid grid-cols-5 gap-1.5 mb-3">
+        {ROOM_PRESETS.map((p) => (
+          <button
+            key={p.id}
+            type="button"
+            title={p.hint}
+            onClick={() => setPreset(preset === p.id ? null : p.id)}
+            className={`px-2 py-1.5 rounded border text-[11px] transition-colors ${
+              preset === p.id
+                ? "border-gold-500/60 bg-gold-500/15 text-gold-200"
+                : "border-white/10 bg-white/[0.02] text-zinc-300 hover:border-gold-500/30"
+            }`}
+          >
+            {p.label}
+          </button>
+        ))}
+      </div>
+
+      {preset && (
+        <div className="grid gap-2">
+          <div className="flex items-center justify-between text-[11px]">
+            <span className="text-zinc-500">Сила эффекта</span>
+            <span className="text-gold-200/90 tabular-nums">{wetPct.toFixed(0)}%</span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={wetPct}
+            onChange={(e) => setWetPct(Number(e.target.value))}
+            className="w-full accent-gold-500"
+          />
+          <div className="text-[10px] text-zinc-600">
+            0% — голос как был. 30% — натурально. 100% — почти один реверб
+            (для эффекта).
+          </div>
+        </div>
+      )}
+    </GlassCard>
+  );
 }

@@ -17,6 +17,7 @@ relative to their length, but never beyond ``max_duration``.
 from __future__ import annotations
 
 import dataclasses
+import re
 from collections.abc import Iterable
 
 
@@ -43,6 +44,86 @@ class SrtConfig:
     word_pause_split_sec: float = 0.7
 
 
+_TRAILING_PUNCT = {",", ".", ":", ";", "!", "?", ")", "»", "”", "…"}
+_DIGIT_GLUE = (".", ",")  # "10" + "." + "000" → "10.000"; "1" + "," + "5"
+
+
+def _coalesce_words(words: list[Word]) -> list[Word]:
+    """Merge token sequences that should never wrap to separate cues.
+
+    Whisper emits punctuation as standalone word tokens, so a phrase like
+    "10.000 рублей или 5%" comes out as ["10", ".", "000", "рублей", "или",
+    "5", "%"]. Joining with spaces gives "10 . 000 рублей или 5 %" — wrong
+    spacing, and worse, the line-budget can split "10" onto one cue and
+    "000" onto the next. This pass glues:
+
+    * <digits> . <digits>  → single token "10.000"
+    * <digits> , <digits>  → single token "10,5"
+    * <digits> %           → single token "10%"
+    * <word>  <trailing-punct>  → single token "Привет," / "конец."
+
+    The merged token's character count then represents the full visible
+    string, so the line budget treats the whole thing as one unit.
+    """
+    src = [w for w in words if w.text.strip()]
+    out: list[Word] = []
+    i = 0
+    while i < len(src):
+        w = src[i]
+        text = w.text.strip()
+        # <digit><.,><digit> — decimal / thousands separator
+        if (
+            i + 2 < len(src)
+            and text[-1:].isdigit()
+            and src[i + 1].text.strip() in _DIGIT_GLUE
+            and src[i + 2].text.strip()[:1].isdigit()
+        ):
+            merged = text + src[i + 1].text.strip() + src[i + 2].text.strip()
+            out.append(Word(start=w.start, end=src[i + 2].end, text=merged))
+            i += 3
+            continue
+        # <digit>% — percentage
+        if (
+            i + 1 < len(src)
+            and text[-1:].isdigit()
+            and src[i + 1].text.strip() == "%"
+        ):
+            out.append(Word(start=w.start, end=src[i + 1].end, text=text + "%"))
+            i += 2
+            continue
+        # <word><trailing-punct> — keep punctuation glued so it never
+        # starts a new cue on its own.
+        if (
+            i + 1 < len(src)
+            and src[i + 1].text.strip() in _TRAILING_PUNCT
+        ):
+            out.append(
+                Word(start=w.start, end=src[i + 1].end, text=text + src[i + 1].text.strip())
+            )
+            i += 2
+            continue
+        out.append(Word(start=w.start, end=w.end, text=text))
+        i += 1
+    return out
+
+
+def _normalize_spacing(text: str) -> str:
+    """Belt-and-braces spacing fix for any glue we missed in the word pass.
+
+    Catches the case where Whisper *did* attach punctuation to its word but
+    we still ended up with spurious whitespace from the join (e.g. multiple
+    consecutive punctuation tokens, or em-dash splits)."""
+    # Drop spaces before closing punctuation.
+    text = re.sub(r"\s+([.,;:!?%»”\)…])", r"\1", text)
+    # Drop spaces after opening punctuation.
+    text = re.sub(r"([(«“])\s+", r"\1", text)
+    # Glue digits split around a separator: "10. 000" → "10.000", "1, 5" → "1,5".
+    text = re.sub(r"(\d)\s*([.,])\s*(\d)", r"\1\2\3", text)
+    # Collapse any double spaces left behind.
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip()
+
+
 def words_to_cues(words: Iterable[Word], cfg: SrtConfig) -> list[Cue]:
     cues: list[Cue] = []
     cur: list[Word] = []
@@ -52,7 +133,7 @@ def words_to_cues(words: Iterable[Word], cfg: SrtConfig) -> list[Cue]:
         nonlocal cur, cur_chars
         if not cur:
             return
-        text = " ".join(w.text.strip() for w in cur).strip()
+        text = _normalize_spacing(" ".join(w.text for w in cur))
         if not text:
             cur = []
             cur_chars = 0
@@ -67,8 +148,9 @@ def words_to_cues(words: Iterable[Word], cfg: SrtConfig) -> list[Cue]:
         cur = []
         cur_chars = 0
 
-    for w in words:
-        wtxt = w.text.strip()
+    merged = _coalesce_words(list(words))
+    for w in merged:
+        wtxt = w.text  # already stripped + coalesced
         if not wtxt:
             continue
         added = len(wtxt) + (1 if cur else 0)

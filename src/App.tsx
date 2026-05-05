@@ -5,6 +5,8 @@ import { SideDrawer } from "./components/SideDrawer";
 import { MODULES, ModulesProvider, useModules } from "./state/modules";
 import type { ModuleId } from "./state/modules";
 import { PipelineProvider, usePipeline } from "./state/usePipeline";
+import { UpdaterProvider } from "./state/updater";
+import { UpdateBanner } from "./components/UpdateBanner";
 import { useHotkeys } from "./state/hotkeys";
 import SubtitlesModule from "./modules/SubtitlesModule";
 import CorridorKeyModule from "./modules/CorridorKeyModule";
@@ -18,7 +20,9 @@ export default function App() {
   return (
     <PipelineProvider>
       <ModulesProvider>
-        <Shell />
+        <UpdaterProvider>
+          <Shell />
+        </UpdaterProvider>
       </ModulesProvider>
     </PipelineProvider>
   );
@@ -114,6 +118,7 @@ function Shell() {
         onOpenSetup={() => setSetupOpen(true)}
         onModulePick={() => setSetupOpen(false)}
       />
+      <UpdateBanner />
     </div>
   );
 }

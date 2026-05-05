@@ -54,12 +54,20 @@ if [[ ! -x "$BIN_PATH" ]]; then
 fi
 
 # --- 2. Override config -----------------------------------------------------
+# We extend the bundle.resources list (not replace it) — the base config
+# already lists assets/ambient/*.opus + assets/ir/*.wav for the audio-fix
+# module, and the override needs to *add* the per-host sidecar binary on
+# top, not stomp on those entries.
 echo "→ Writing release override → $OVERRIDE"
 cat >"$OVERRIDE" <<EOF
 {
   "\$schema": "https://schema.tauri.app/config/2",
   "bundle": {
-    "resources": ["binaries/${BIN_NAME}"]
+    "resources": [
+      "binaries/${BIN_NAME}",
+      "assets/ambient/*.opus",
+      "assets/ir/*.wav"
+    ]
   }
 }
 EOF
