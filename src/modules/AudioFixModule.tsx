@@ -21,7 +21,7 @@ import {
   notify,
   onAudioFixProgress,
   pickAudioFile,
-  pickVideoFile,
+  pickMediaFile,
   revealInShell,
   VIDEO_EXTS,
 } from "../lib/tauri";
@@ -31,10 +31,30 @@ import type {
   AudioFixProgress,
   AudioFixResult,
   RoomPreset,
+  VocalMode,
 } from "../lib/tauri";
 
-const isVideoPath = (p: string) =>
-  VIDEO_EXTS.some((ext) => p.toLowerCase().endsWith(`.${ext}`));
+// AudioFix happily takes audio-only files too: ffmpeg copies the absent video
+// stream as no-op (`-c:v copy` is a no-op when there's no video), so the
+// output is also pure audio in the same container — same logic, no special
+// case in the backend.
+const AUDIO_EXTS = [
+  "mp3",
+  "wav",
+  "m4a",
+  "aac",
+  "ogg",
+  "opus",
+  "flac",
+  "wma",
+];
+const isMediaPath = (p: string) => {
+  const lower = p.toLowerCase();
+  return (
+    VIDEO_EXTS.some((ext) => lower.endsWith(`.${ext}`)) ||
+    AUDIO_EXTS.some((ext) => lower.endsWith(`.${ext}`))
+  );
+};
 
 type Phase = "idle" | "running" | "done" | "error" | "cancelled";
 
@@ -48,19 +68,22 @@ const PEAK_PRESETS: { label: string; value: number; hint: string }[] = [
 ];
 
 const AMBIENT_PRESETS: { id: AmbientPreset; label: string; hint: string }[] = [
-  { id: "room_tone", label: "Комната", hint: "Лёгкий гул пустой комнаты (brown noise)" },
-  { id: "pink_room", label: "Студия", hint: "Розовый шум — нейтральный фон" },
-  { id: "white_air", label: "Шипение", hint: "Белый шум — лёгкое 'воздушное' шипение" },
+  { id: "room_tone", label: "Комната", hint: "Лёгкий гул пустой комнаты" },
+  { id: "pink_room", label: "Студия", hint: "Нейтральный розовый шум" },
+  { id: "white_air", label: "Шипение", hint: "Лёгкое воздушное шипение" },
   { id: "ac_hum", label: "Кондиционер", hint: "Низкочастотный гул вентиляции" },
   { id: "distant_rumble", label: "Дальний гул", hint: "Очень низкий городской фон" },
+  { id: "wind_mic", label: "Ветер в микрофон", hint: "Порывы ветра, бьющие по микрофону" },
+  { id: "hall_crowd", label: "Толпа в зале", hint: "Гомон зала с людьми" },
+  { id: "museum_crowd", label: "Толпа в музее", hint: "Тихий шепчущий гомон" },
+  { id: "street", label: "Улица", hint: "Ветер + проезжающие машины" },
 ];
 
 const ROOM_PRESETS: { id: RoomPreset; label: string; hint: string }[] = [
-  { id: "studio", label: "Студия", hint: "Короткое затухание — ~0.4 с" },
-  { id: "stage", label: "Сцена", hint: "Средняя комната — ~1 с" },
-  { id: "hall", label: "Зал", hint: "Большой зал — ~2.5 с" },
-  { id: "cathedral", label: "Собор", hint: "Очень длинный реверб — ~4 с" },
-  { id: "outdoor", label: "Улица", hint: "Короткий с поглощением высоких" },
+  { id: "studio", label: "Студия", hint: "Лёгкое затухание — ~0.3 с" },
+  { id: "stage", label: "Сцена", hint: "Средняя комната — ~0.7 с" },
+  { id: "hall", label: "Зал", hint: "Большой зал — ~1.5 с" },
+  { id: "cathedral", label: "Собор", hint: "Длинный реверб — ~2.5 с" },
 ];
 
 export default function AudioFixModule() {
@@ -89,13 +112,16 @@ function AudioFixInner() {
   const [roomPreset, setRoomPreset] = useState<RoomPreset | null>(null);
   const [roomWetPct, setRoomWetPct] = useState(30);
 
+  // Vocal/karaoke split via ffmpeg mid/side. null = passthrough.
+  const [vocalMode, setVocalMode] = useState<VocalMode | null>(null);
+
   const [phase, setPhase] = useState<Phase>("idle");
   const [progress, setProgress] = useState<AudioFixProgress | null>(null);
   const [result, setResult] = useState<AudioFixResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useModuleDrop("audio_fix", (paths) => {
-    const v = paths.find(isVideoPath);
+    const v = paths.find(isMediaPath);
     if (v) setVideoPath(v);
   });
 
@@ -117,7 +143,11 @@ function AudioFixInner() {
   const canRun =
     !!videoPath &&
     phase !== "running" &&
-    (denoise || loudnorm || ambientEnabled || roomPreset !== null);
+    (denoise ||
+      loudnorm ||
+      ambientEnabled ||
+      roomPreset !== null ||
+      vocalMode !== null);
 
   const run = async () => {
     if (!videoPath) return;
@@ -134,6 +164,7 @@ function AudioFixInner() {
       ambient_level_db: ambientLevelDb,
       room_preset: roomPreset,
       room_wet_pct: roomWetPct,
+      vocal_mode: vocalMode,
     };
     try {
       const r = await audioFixRun(videoPath, opts);
@@ -157,7 +188,7 @@ function AudioFixInner() {
   };
 
   const browse = async () => {
-    const p = await pickVideoFile();
+    const p = await pickMediaFile();
     if (p) setVideoPath(p);
   };
 
@@ -196,10 +227,11 @@ function AudioFixInner() {
       {!videoPath && (
         <GlassCard className="border-dashed border-white/10 hover:border-gold-500/40 transition-colors">
           <div className="h-56 grid place-items-center text-zinc-500 text-sm text-center">
-            Drag &amp; drop видео сюда
+            Drag &amp; drop видео или аудио сюда
             <br />
             <span className="text-zinc-600 text-[11px]">
-              .mp4 .mov .mkv .avi .webm .flv .m4v
+              видео: .mp4 .mov .mkv .avi .webm · аудио: .mp3 .wav .m4a .aac
+              .ogg .flac
             </span>
           </div>
         </GlassCard>
@@ -335,6 +367,8 @@ function AudioFixInner() {
         wetPct={roomWetPct}
         setWetPct={setRoomWetPct}
       />
+
+      <VocalCard mode={vocalMode} setMode={setVocalMode} />
 
       {phase === "running" && (
         <GlassCard>
@@ -590,6 +624,61 @@ function AmbientCard({
   );
 }
 
+function VocalCard({
+  mode,
+  setMode,
+}: {
+  mode: VocalMode | null;
+  setMode: (m: VocalMode | null) => void;
+}) {
+  const OPTIONS: { id: VocalMode; label: string; hint: string }[] = [
+    { id: "extract", label: "Вытащить вокал", hint: "Оставить только то, что в центре стерео-картины (обычно вокал)" },
+    { id: "remove", label: "Убрать вокал (караоке)", hint: "Подавить центр стерео-картины — минусовка" },
+  ];
+  return (
+    <GlassCard>
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
+          <PixelSparkles size={14} className="text-gold-300" />
+          Голос / музыка
+        </h2>
+        {mode && (
+          <button
+            type="button"
+            onClick={() => setMode(null)}
+            className="text-[11px] text-zinc-500 hover:text-zinc-200"
+          >
+            Выключить
+          </button>
+        )}
+      </div>
+      <p className="text-[11px] text-zinc-500 mb-3">
+        Простое разделение через mid/side: работает на стерео-миксах с
+        вокалом по центру (радио-стиль). На записях с жёстко спанорамированным
+        или продублированным вокалом результат будет ниже, чем у
+        нейросетевого Demucs — без 1 ГБ модели по-другому не получится.
+      </p>
+      <div className="grid grid-cols-2 gap-1.5">
+        {OPTIONS.map((opt) => (
+          <button
+            key={opt.id}
+            type="button"
+            title={opt.hint}
+            onClick={() => setMode(mode === opt.id ? null : opt.id)}
+            className={`px-2.5 py-2 rounded border text-[12px] transition-colors ${
+              mode === opt.id
+                ? "border-gold-500/60 bg-gold-500/15 text-gold-200"
+                : "border-white/10 bg-white/[0.02] text-zinc-300 hover:border-gold-500/30"
+            }`}
+          >
+            {opt.label}
+          </button>
+        ))}
+      </div>
+    </GlassCard>
+  );
+}
+
 function RoomCard({
   preset,
   setPreset,
@@ -623,7 +712,7 @@ function RoomCard({
         «вписать» сухой голос в более живой пространственный микс.
       </p>
 
-      <div className="grid grid-cols-5 gap-1.5 mb-3">
+      <div className="grid grid-cols-4 gap-1.5 mb-3">
         {ROOM_PRESETS.map((p) => (
           <button
             key={p.id}

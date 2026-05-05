@@ -1,21 +1,23 @@
-import { useEffect, useRef, useState } from "react";
-
 /**
  * Four-field timecode editor: `H : MM : SS . CC` (centiseconds, 1/100 s).
  *
- * Why centiseconds and not SMPTE frames: kadровая точность тащит за собой
- * необходимость знать FPS источника, и кадровый счётчик ломается на
- * variable-frame-rate записях (телефонные камеры). 100-я доля секунды даёт
- * точность ниже человеческого порога восприятия и работает на любом видео.
+ * Centiseconds (not SMPTE frames) so we don't need to know FPS — works the
+ * same on 24/25/30/60 fps and on variable-frame-rate phone footage. 1/100 s
+ * is below the perceptible threshold for cuts, so users get frame-comparable
+ * precision without the FPS-detection landmines.
  *
- * Каждое поле редактируется напрямую (клик → ввод) и/или со стрелок на
- * клавиатуре / колёсиком мыши. Переполнение поля каскадно бамает старшее
- * (секунды 59 → 60 при +1 → секунды 0 + минуты +1).
+ * Each field is a plain controlled `<input type="text">` — typing immediately
+ * propagates through `onChange`, no internal "editing/draft" state to get out
+ * of sync with the parent. Selection-on-focus + arrow / wheel adjustments
+ * cover the same UX as a stepper without needing a custom one.
+ *
+ * Field overflow cascades up the timeline: typing "65" into the seconds
+ * field rolls over to +1 minute via partsToSeconds rather than capping at 59.
  */
 export interface TimecodePickerProps {
   value: number; // seconds
   onChange: (next: number) => void;
-  /** Hard upper bound — if `value` would exceed `max`, it's clamped on commit. */
+  /** Hard upper bound — clamped on commit. */
   max: number;
   /** Hard lower bound. Defaults to 0. */
   min?: number;
@@ -71,7 +73,6 @@ export function TimecodePicker({
     >
       <Field
         value={parts.h}
-        width={2}
         max={9}
         onCommit={(v) => commit({ ...parts, h: v })}
         disabled={disabled}
@@ -80,7 +81,6 @@ export function TimecodePicker({
       <Sep />
       <Field
         value={parts.m}
-        width={2}
         max={59}
         pad
         onCommit={(v) => commit({ ...parts, m: v })}
@@ -90,7 +90,6 @@ export function TimecodePicker({
       <Sep />
       <Field
         value={parts.s}
-        width={2}
         max={59}
         pad
         onCommit={(v) => commit({ ...parts, s: v })}
@@ -100,7 +99,6 @@ export function TimecodePicker({
       <Sep dot />
       <Field
         value={parts.cc}
-        width={2}
         max={99}
         pad
         onCommit={(v) => commit({ ...parts, cc: v })}
@@ -121,60 +119,34 @@ function Sep({ dot = false }: { dot?: boolean }) {
 
 interface FieldProps {
   value: number;
-  width: number;
+  /** Soft max for keyboard step / wheel — typing past it just rolls over via
+   *  the parent's partsToSeconds, but keyboard +/- stops here. */
   max: number;
-  /** Pad with leading zero to `width` digits. The leftmost field skips this
-   *  so "1:02:03.04" renders without a leading "01" hour. */
+  /** Pad to two digits with a leading zero. The hour field skips this so
+   *  short timecodes render as "1:02:03.04" instead of "01:02:03.04". */
   pad?: boolean;
   onCommit: (v: number) => void;
   disabled?: boolean;
   ariaLabel: string;
 }
 
-/** Single time-component editor — keeps a string draft so the user can type
- *  freely (delete+retype) without the field snapping to a partial value. */
-function Field({
-  value,
-  width,
-  max,
-  pad,
-  onCommit,
-  disabled,
-  ariaLabel,
-}: FieldProps) {
-  const [draft, setDraft] = useState<string>(format(value, pad, width));
-  const [editing, setEditing] = useState(false);
-  const ref = useRef<HTMLInputElement>(null);
-
-  // Sync draft from outside when not actively editing.
-  useEffect(() => {
-    if (!editing) setDraft(format(value, pad, width));
-  }, [value, pad, width, editing]);
-
-  const submit = (raw: string) => {
-    const cleaned = raw.replace(/\D+/g, "");
-    let n = cleaned ? parseInt(cleaned, 10) : 0;
-    if (Number.isNaN(n)) n = 0;
-    // Don't clamp to component-local `max` here — let the parent re-clamp
-    // against the global timeline so e.g. typing "65" into seconds rolls
-    // over into minutes via partsToSeconds rather than capping at 59.
-    onCommit(n);
-  };
+/// Single time-component editor. Stateless — re-derives display from `value`
+/// every render and propagates each keystroke directly.
+function Field({ value, max, pad, onCommit, disabled, ariaLabel }: FieldProps) {
+  const display = pad ? String(value).padStart(2, "0") : String(value);
 
   return (
     <input
-      ref={ref}
       type="text"
       inputMode="numeric"
-      value={editing ? draft : format(value, pad, width)}
-      onFocus={(e) => {
-        setEditing(true);
-        e.currentTarget.select();
-      }}
-      onChange={(e) => setDraft(e.target.value)}
-      onBlur={() => {
-        setEditing(false);
-        submit(draft);
+      value={display}
+      onFocus={(e) => e.currentTarget.select()}
+      onChange={(e) => {
+        // Strip non-digits so paste of "01:23" or "5 sec" still parses.
+        // Keep only the last 3 chars so the field doesn't grow unboundedly
+        // while a user is typing — partsToSeconds will roll the overflow up.
+        const cleaned = e.target.value.replace(/\D+/g, "").slice(-3);
+        onCommit(cleaned ? parseInt(cleaned, 10) : 0);
       }}
       onKeyDown={(e) => {
         if (e.key === "ArrowUp") {
@@ -183,32 +155,19 @@ function Field({
         } else if (e.key === "ArrowDown") {
           e.preventDefault();
           onCommit(Math.max(value - 1, 0));
-        } else if (e.key === "Enter") {
-          e.currentTarget.blur();
-        } else if (e.key === "Escape") {
-          setDraft(format(value, pad, width));
-          setEditing(false);
-          e.currentTarget.blur();
         }
       }}
       onWheel={(e) => {
         if (document.activeElement !== e.currentTarget) return;
-        e.preventDefault();
         const delta = e.deltaY < 0 ? 1 : -1;
         onCommit(Math.max(0, Math.min(value + delta, max)));
       }}
       disabled={disabled}
       aria-label={ariaLabel}
-      className="bg-transparent text-zinc-100 text-[13px] tabular-nums text-center outline-none w-[2ch] focus:text-gold-200"
-      style={{ width: `${width}ch` }}
+      className="bg-transparent text-zinc-100 text-[13px] tabular-nums text-center outline-none focus:text-gold-200 disabled:cursor-not-allowed"
+      style={{ width: "2ch" }}
     />
   );
-}
-
-function format(n: number, pad: boolean | undefined, width: number): string {
-  const s = String(Math.max(0, Math.floor(n)));
-  if (!pad) return s;
-  return s.padStart(width, "0");
 }
 
 export function formatTimecode(seconds: number): string {

@@ -26,6 +26,29 @@ pub fn ping() -> &'static str {
     "pong"
 }
 
+/// Probe a video/audio file's duration in seconds via ffmpeg. Used by the
+/// Utils trim slider and the Audio Fix module — front-end's `<video src=
+/// "asset://...">` approach proved fragile (pathnames with spaces, audio-
+/// only files), and routing through the same ffmpeg the rest of the app
+/// already uses is platform-neutral and consistent.
+#[tauri::command]
+pub async fn probe_video_duration(
+    video_path: PathBuf,
+    settings: State<'_, SettingsStore>,
+) -> Result<f32, String> {
+    if !video_path.exists() {
+        return Err(format!("Файл не найден: {}", video_path.display()));
+    }
+    let snap = settings.snapshot();
+    let ffmpeg = snap
+        .ffmpeg_path
+        .clone()
+        .ok_or_else(|| "FFmpeg не установлен — Setup".to_string())?;
+    crate::preview::probe_duration_public(&ffmpeg, &video_path)
+        .await
+        .ok_or_else(|| "Не удалось прочитать длительность".to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
@@ -446,14 +469,23 @@ pub struct AudioFixOptions {
     #[serde(default = "default_ambient_db")]
     pub ambient_level_db: f32,
 
-    /// Bundled IR preset id for room reverb ("hall" / "cathedral" / "studio"
-    /// / "stage" / "outdoor"). `None` = no reverb.
+    /// Bundled IR preset id for room reverb ("studio" / "stage" / "hall" /
+    /// "cathedral"). `None` = no reverb.
     #[serde(default)]
     pub room_preset: Option<String>,
     /// Wet/dry mix in percent (0 = bypass, 100 = full reverb). 25-40 is
     /// usually pleasant for speech.
     #[serde(default = "default_room_wet")]
     pub room_wet_pct: f32,
+
+    /// Vocal isolation via mid/side processing. None = passthrough,
+    /// "extract" = collapse to the center channel (vocal + anything panned
+    /// dead-center), "remove" = subtract the center for a karaoke mix.
+    /// Works on radio-style stereo mixes; songs with hard-panned vocals or
+    /// stereo doubling won't separate cleanly — that's the trade-off of
+    /// skipping a neural-network demixer.
+    #[serde(default)]
+    pub vocal_mode: Option<String>,
 }
 
 fn default_ambient_db() -> f32 {
@@ -557,6 +589,27 @@ pub async fn audio_fix_run<R: Runtime>(
     // The cheap path (no ambient, no room) stays on the simple `-af` chain;
     // anything with extra inputs goes through `-filter_complex`.
     let mut chain: Vec<String> = Vec::new();
+
+    // Vocal-isolation goes *first*. After mid/side the channel layout is
+    // mono (extract) or stays stereo (remove); subsequent filters all
+    // accept either, so order doesn't matter beyond that — but doing this
+    // up front keeps the karaoke output clean of denoiser artefacts that
+    // would otherwise be amplified when we cancel the center channel.
+    match options.vocal_mode.as_deref() {
+        Some("extract") => {
+            // Sum L+R into a mono center, then high-pass at 80 Hz to drop
+            // the bass rumble that was usually mixed mono *anyway* and
+            // would otherwise dominate the isolated vocal.
+            chain.push("pan=mono|c0=0.5*c0+0.5*c1,highpass=f=80".into());
+        }
+        Some("remove") => {
+            // Classic karaoke trick: invert one side of the stereo image
+            // against the other so anything dead-center cancels out.
+            chain.push("pan=stereo|c0=c0-c1|c1=c1-c0".into());
+        }
+        _ => {}
+    }
+
     if options.denoise {
         let model = setup::extra_dest("rnnoise_model").ok_or_else(|| {
             "Не нашёл путь к модели RNNoise".to_string()
@@ -581,10 +634,15 @@ pub async fn audio_fix_run<R: Runtime>(
         chain.push(format!("volume={gain:.2}dB"));
     }
 
+    let vocal_active = matches!(
+        options.vocal_mode.as_deref(),
+        Some("extract") | Some("remove")
+    );
     let any_op = options.denoise
         || options.loudnorm
         || ambient_input_idx.is_some()
-        || room_input_idx.is_some();
+        || room_input_idx.is_some()
+        || vocal_active;
     if !any_op {
         return Err("Включите хотя бы одну операцию.".to_string());
     }
@@ -594,16 +652,37 @@ pub async fn audio_fix_run<R: Runtime>(
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("output");
-    let ext = video_path
+    let in_ext = video_path
         .extension()
         .and_then(|s| s.to_str())
-        .unwrap_or("mp4");
+        .unwrap_or("mp4")
+        .to_ascii_lowercase();
+    // Audio-only inputs (mp3, wav, m4a, etc.) need different output codecs
+    // than video — `-c:v copy` is harmless when there's no video stream, but
+    // pairing `-c:a aac` with an `.mp3` extension produces a broken file
+    // because the MP3 container can't carry AAC. Pick the right codec/ext
+    // based on what we got in.
+    let is_audio_only = matches!(
+        in_ext.as_str(),
+        "mp3" | "wav" | "m4a" | "aac" | "ogg" | "opus" | "flac" | "wma"
+    );
+    let out_ext = if is_audio_only {
+        match in_ext.as_str() {
+            "wav" => "wav",
+            "flac" => "flac",
+            "ogg" | "opus" => "opus",
+            // mp3/aac/m4a/wma all happily live in an .m4a container with AAC.
+            _ => "m4a",
+        }
+    } else {
+        in_ext.as_str()
+    };
     let out_dir = settings
         .module_output_dir("audio_fix")
         .or_else(|| video_path.parent().map(|p| p.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."));
     let _ = std::fs::create_dir_all(&out_dir);
-    let out_path = out_dir.join(format!("{stem}_audio.{ext}"));
+    let out_path = out_dir.join(format!("{stem}_audio.{out_ext}"));
 
     // FFmpeg duration for progress total (ms).
     let total_ms = crate::preview::probe_duration_public(&ffmpeg, &video_path)
@@ -664,17 +743,17 @@ pub async fn audio_fix_run<R: Runtime>(
             last_label = "mix".to_string();
         }
 
-        // Stage D — convolution reverb via afir.
+        // Stage D — convolution reverb via afir. `dry` and `wet` are the
+        // linear gains for the dry vs convolved signal (default 1.0 each).
+        // We model the wet/dry slider as a true crossfade — 0% = pure dry,
+        // 100% = pure wet — so the sum stays close to unity gain. The
+        // earlier formula (/10) was attenuating the dry signal so much that
+        // even a 30 % mix sounded like the voice had been muted.
         if let Some(idx) = room_input_idx {
-            let wet = options.room_wet_pct.clamp(0.0, 100.0);
-            let dry = (100.0 - wet).max(0.0);
-            // afir takes the dialogue as the first input and the IR as the
-            // second; `wet`/`dry` are linear gains expressed as 0..10
-            // (per the filter docs). We map 0..100 % → 0..10.
+            let wet_norm = options.room_wet_pct.clamp(0.0, 100.0) / 100.0;
+            let dry_norm = (1.0 - wet_norm).max(0.0);
             graph.push(format!(
-                "[{last_label}][{idx}:a]afir=dry={:.2}:wet={:.2}:length=1:irnorm=1[out]",
-                dry / 10.0,
-                wet / 10.0,
+                "[{last_label}][{idx}:a]afir=dry={dry_norm:.3}:wet={wet_norm:.3}:length=1:irnorm=-1[out]"
             ));
             last_label = "out".to_string();
         }
@@ -684,8 +763,21 @@ pub async fn audio_fix_run<R: Runtime>(
         cmd.args(["-filter_complex", &filter_complex, "-map", "0:v?", "-map", &format!("[{last_label}]")]);
     }
 
-    cmd.args(["-c:v", "copy", "-c:a", "aac", "-b:a", "192k"])
-        .args(["-progress", "pipe:2"])
+    if is_audio_only {
+        // Audio-only path — no video stream to copy, just transcode audio
+        // into whatever the chosen `out_ext` container natively prefers.
+        let codec_args: &[&str] = match out_ext {
+            "wav" => &["-vn", "-c:a", "pcm_s16le"],
+            "flac" => &["-vn", "-c:a", "flac"],
+            "opus" => &["-vn", "-c:a", "libopus", "-b:a", "192k"],
+            // m4a / aac default
+            _ => &["-vn", "-c:a", "aac", "-b:a", "192k"],
+        };
+        cmd.args(codec_args);
+    } else {
+        cmd.args(["-c:v", "copy", "-c:a", "aac", "-b:a", "192k"]);
+    }
+    cmd.args(["-progress", "pipe:2"])
         .arg(&out_path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -1289,4 +1381,196 @@ async fn measure_peak_dbfs(
             stderr.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n")
         )
     })
+}
+
+// ---------------------------------------------------------------------------
+// Logo Remover module — pure FFmpeg `delogo` filter pipeline. The user
+// drags a rectangle (or several) on a preview frame; we feed each one as a
+// `delogo=x=N:y=N:w=N:h=N` clause into a chained -vf graph. FFmpeg fills
+// the rectangle with interpolation from neighbouring pixels — works well
+// for static logos / watermarks parked in a corner, much less so for
+// moving text in the middle of the frame (that needs ProPainter, which
+// we haven't shipped yet).
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize, Debug, Clone)]
+pub struct LogoRegion {
+    /// Top-left coordinate in *source video* pixels (not preview pixels).
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+#[derive(serde::Serialize)]
+pub struct LogoResult {
+    pub output_video: PathBuf,
+}
+
+static LOGO_REMOVER_CANCEL: once_cell::sync::Lazy<
+    std::sync::Mutex<Option<u32>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(None));
+
+#[tauri::command]
+pub fn logo_remover_cancel() {
+    if let Ok(g) = LOGO_REMOVER_CANCEL.lock() {
+        if let Some(pid) = *g {
+            let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn logo_remover_run<R: Runtime>(
+    app: AppHandle<R>,
+    video_path: PathBuf,
+    regions: Vec<LogoRegion>,
+    settings: State<'_, SettingsStore>,
+) -> Result<LogoResult, String> {
+    use tauri::Emitter;
+    use tokio::io::AsyncBufReadExt;
+
+    if !video_path.exists() {
+        return Err(format!("Файл не найден: {}", video_path.display()));
+    }
+    if regions.is_empty() {
+        return Err("Не выделено ни одной области для удаления.".to_string());
+    }
+    let snap = settings.snapshot();
+    let ffmpeg = snap
+        .ffmpeg_path
+        .clone()
+        .ok_or_else(|| "FFmpeg не установлен — Setup".to_string())?;
+
+    // Sanity-check region geometry. delogo wants 1×1 minimum and refuses
+    // rectangles touching the edge of the frame, so clamp to ≥1px size and
+    // skip zero-area boxes the UI may have produced.
+    let regions: Vec<LogoRegion> = regions
+        .into_iter()
+        .filter(|r| r.w >= 1 && r.h >= 1)
+        .collect();
+    if regions.is_empty() {
+        return Err("Все выделенные области пустые — нечего удалять.".to_string());
+    }
+
+    let filter = regions
+        .iter()
+        .map(|r| format!("delogo=x={}:y={}:w={}:h={}", r.x, r.y, r.w, r.h))
+        .collect::<Vec<_>>()
+        .join(",");
+    log::info!("logo_remover vf: {filter}");
+
+    // Output: per-module override → next to source.
+    let stem = video_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+    let ext = video_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("mp4");
+    let out_dir = settings
+        .module_output_dir("logo_remover")
+        .or_else(|| video_path.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let _ = std::fs::create_dir_all(&out_dir);
+    let out_path = out_dir.join(format!("{stem}_clean.{ext}"));
+
+    let total_ms = crate::preview::probe_duration_public(&ffmpeg, &video_path)
+        .await
+        .map(|s| (s * 1000.0) as i64)
+        .unwrap_or(0);
+    let total = total_ms as f32 / 1000.0;
+
+    let _ = app.emit(
+        "logo_remover://progress",
+        serde_json::json!({ "stage": "Кодирование", "pos": 0.0, "total": total }),
+    );
+
+    let mut child = tokio::process::Command::new(&ffmpeg)
+        .arg("-y")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-i")
+        .arg(&video_path)
+        .args(["-vf", &filter])
+        // Audio passes through untouched — delogo only touches video.
+        .args(["-c:a", "copy"])
+        .args(["-progress", "pipe:2"])
+        .arg(&out_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("ffmpeg spawn failed: {e}"))?;
+
+    if let Some(pid) = child.id() {
+        if let Ok(mut g) = LOGO_REMOVER_CANCEL.lock() {
+            *g = Some(pid);
+        }
+    }
+
+    let stderr = child.stderr.take().ok_or("no stderr".to_string())?;
+    let app_progress = app.clone();
+    let progress_task = tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            if let Some(rest) = line.strip_prefix("out_time_us=") {
+                if let Ok(us) = rest.trim().parse::<i64>() {
+                    let pos = (us as f32) / 1_000_000.0;
+                    let _ = app_progress.emit(
+                        "logo_remover://progress",
+                        serde_json::json!({
+                            "stage": "Удаление логотипа",
+                            "pos": pos,
+                            "total": total,
+                        }),
+                    );
+                }
+            } else if line.to_lowercase().contains("error") || line.contains("Invalid") {
+                log::warn!("[ffmpeg logo_remover] {line}");
+            }
+        }
+    });
+
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    let _ = progress_task.await;
+    if let Ok(mut g) = LOGO_REMOVER_CANCEL.lock() {
+        *g = None;
+    }
+
+    if !status.success() {
+        if status.code() == Some(255) || status.code().is_none() {
+            return Err("Прервано".to_string());
+        }
+        return Err(format!("ffmpeg exit {status}"));
+    }
+
+    let _ = app.emit(
+        "logo_remover://progress",
+        serde_json::json!({ "stage": "Готово", "pos": 1.0, "total": 1.0 }),
+    );
+    Ok(LogoResult { output_video: out_path })
+}
+
+/// Probe video display dimensions (post-rotation). Used by Logo Remover so
+/// the canvas overlay can map preview-pixel → source-pixel coordinates
+/// without guessing dimensions on the JS side.
+#[tauri::command]
+pub async fn probe_video_dimensions(
+    video_path: PathBuf,
+    settings: State<'_, SettingsStore>,
+) -> Result<(u32, u32), String> {
+    if !video_path.exists() {
+        return Err(format!("Файл не найден: {}", video_path.display()));
+    }
+    let snap = settings.snapshot();
+    let ffmpeg = snap
+        .ffmpeg_path
+        .clone()
+        .ok_or_else(|| "FFmpeg не установлен — Setup".to_string())?;
+    crate::preview::probe_video_dimensions(&ffmpeg, &video_path)
+        .await
+        .ok_or_else(|| "Не удалось прочитать размер видео".to_string())
 }

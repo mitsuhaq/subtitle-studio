@@ -135,14 +135,17 @@ export type AmbientPreset =
   | "pink_room"
   | "white_air"
   | "ac_hum"
-  | "distant_rumble";
+  | "distant_rumble"
+  | "wind_mic"
+  | "hall_crowd"
+  | "museum_crowd"
+  | "street";
 
-export type RoomPreset =
-  | "hall"
-  | "cathedral"
-  | "studio"
-  | "stage"
-  | "outdoor";
+export type RoomPreset = "studio" | "stage" | "hall" | "cathedral";
+
+/// `extract` keeps the vocal (mid channel), `remove` cancels it (karaoke).
+/// Quality depends on how center-mixed the vocal was in the source.
+export type VocalMode = "extract" | "remove";
 
 export interface AudioFixOptions {
   denoise: boolean;
@@ -161,6 +164,9 @@ export interface AudioFixOptions {
   room_preset?: RoomPreset | null;
   /** Wet/dry mix percentage, 0..100. 0 = dry only. */
   room_wet_pct?: number;
+
+  /** Vocal isolation via mid/side processing. */
+  vocal_mode?: VocalMode | null;
 }
 
 export interface AudioFixResult {
@@ -177,6 +183,38 @@ export const audioFixRun = (videoPath: string, options: AudioFixOptions) =>
   invoke<AudioFixResult>("audio_fix_run", { videoPath, options });
 
 export const audioFixCancel = () => invoke<void>("audio_fix_cancel");
+
+// ---------------------------------------------------------------------------
+// Logo Remover — pure FFmpeg `delogo` filter
+// ---------------------------------------------------------------------------
+
+export interface LogoRegion {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+export interface LogoResult {
+  output_video: string;
+}
+export interface LogoProgress {
+  stage: string;
+  pos: number;
+  total: number;
+}
+
+export const logoRemoverRun = (videoPath: string, regions: LogoRegion[]) =>
+  invoke<LogoResult>("logo_remover_run", { videoPath, regions });
+export const logoRemoverCancel = () => invoke<void>("logo_remover_cancel");
+
+export function onLogoRemoverProgress(
+  cb: (p: LogoProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<LogoProgress>("logo_remover://progress", (e) => cb(e.payload));
+}
+
+export const probeVideoDimensions = (videoPath: string) =>
+  invoke<[number, number]>("probe_video_dimensions", { videoPath });
 
 // ---------------------------------------------------------------------------
 // Utils — trim / convert / overlay (pure FFmpeg)
@@ -466,6 +504,12 @@ export async function pickVideoFile(): Promise<string | null> {
   return Array.isArray(result) ? (result[0] ?? null) : result;
 }
 
+/// Probe duration of a video/audio file via the Rust ffmpeg pipeline.
+/// Replaces the previous `<video src="asset://…">` trick which is fragile
+/// for paths with spaces and doesn't work for audio-only files at all.
+export const probeVideoDuration = (videoPath: string) =>
+  invoke<number>("probe_video_duration", { videoPath });
+
 export async function pickAudioFile(): Promise<string | null> {
   const result = await openDialog({
     title: "Выберите аудио",
@@ -473,6 +517,35 @@ export async function pickAudioFile(): Promise<string | null> {
     directory: false,
     filters: [
       { name: "Аудио", extensions: ["mp3", "wav", "m4a", "aac", "ogg", "opus", "flac", "wma"] },
+    ],
+  });
+  if (!result) return null;
+  return Array.isArray(result) ? (result[0] ?? null) : result;
+}
+
+/// Audio-or-video picker — used by Audio Fix where the input can be either.
+/// FFmpeg handles both transparently; the dialog filter just makes the
+/// browse experience friendlier than a raw "all files" dropdown.
+export async function pickMediaFile(): Promise<string | null> {
+  const result = await openDialog({
+    title: "Выберите видео или аудио",
+    multiple: false,
+    directory: false,
+    filters: [
+      {
+        name: "Медиа",
+        extensions: [
+          ...VIDEO_EXTS,
+          "mp3",
+          "wav",
+          "m4a",
+          "aac",
+          "ogg",
+          "opus",
+          "flac",
+          "wma",
+        ],
+      },
     ],
   });
   if (!result) return null;

@@ -8,6 +8,7 @@ import {
 } from "react";
 import {
   PixelCaption,
+  PixelEraser,
   PixelKey,
   PixelMic,
   PixelScissors,
@@ -20,6 +21,7 @@ export type ModuleId =
   | "corridor_key"
   | "rotobrush"
   | "audio_fix"
+  | "logo_remover"
   | "utils";
 
 export interface ModuleDef {
@@ -63,6 +65,13 @@ export const MODULES: ModuleDef[] = [
     requires: ["DeepFilterNet"],
   },
   {
+    id: "logo_remover",
+    name: "Удалить логотип",
+    tagline: "Скрыть водяной знак или статичный логотип.",
+    icon: PixelEraser,
+    requires: [],
+  },
+  {
     id: "utils",
     name: "Утилиты",
     tagline: "Обрезка, перекодировка, оверлей картинки.",
@@ -92,6 +101,8 @@ export function ModulesProvider({ children }: { children: ReactNode }) {
     corridor_key: false,
     rotobrush: false,
     audio_fix: false,
+    // Logo Remover: pure FFmpeg `delogo` filter, no model needed.
+    logo_remover: true,
     // Utils: pure FFmpeg, always available.
     utils: true,
   });

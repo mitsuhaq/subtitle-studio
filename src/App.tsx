@@ -12,6 +12,7 @@ import SubtitlesModule from "./modules/SubtitlesModule";
 import CorridorKeyModule from "./modules/CorridorKeyModule";
 import RotobrushModule from "./modules/RotobrushModule";
 import AudioFixModule from "./modules/AudioFixModule";
+import LogoRemoverModule from "./modules/LogoRemoverModule";
 import UtilsModule from "./modules/UtilsModule";
 import SetupTab from "./tabs/SetupTab";
 import { PixelArrowLeft, PixelWrench } from "./components/icons";
@@ -158,5 +159,6 @@ const MODULE_BY_ID: Record<ModuleId, React.ComponentType> = {
   corridor_key: CorridorKeyModule,
   rotobrush: RotobrushModule,
   audio_fix: AudioFixModule,
+  logo_remover: LogoRemoverModule,
   utils: UtilsModule,
 };

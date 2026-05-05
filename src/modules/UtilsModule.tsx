@@ -17,6 +17,7 @@ import {
   onUtilsProgress,
   pickImageFile,
   pickVideoFile,
+  probeVideoDuration,
   revealInShell,
   utilConvert,
   utilOverlay,
@@ -75,24 +76,28 @@ export default function UtilsModule() {
   });
 
   // Probe duration of the first selected video for the trim sliders.
+  // Routed through Rust+ffmpeg (probe_video_duration) instead of the old
+  // `<video asset://…>` trick — that approach silently never fired
+  // `loadedmetadata` for some path layouts (spaces in volume names, drive
+  // letters on Windows) which left both the slider AND the timecode picker
+  // stuck on `disabled` because duration was never set.
   useEffect(() => {
     if (op !== "trim" || videos.length === 0) return;
     let cancelled = false;
-    const v = document.createElement("video");
-    v.preload = "metadata";
-    // Local file URL — Tauri allowlist already covers reading metadata via
-    // the asset protocol because we enabled it for the Style preview.
-    v.src = `asset://localhost/${encodeURI(videos[0])}`;
-    v.onloadedmetadata = () => {
-      if (cancelled || !Number.isFinite(v.duration)) return;
-      setDuration(v.duration);
-      setStartSec(0);
-      setEndSec(v.duration);
-    };
+    probeVideoDuration(videos[0])
+      .then((dur) => {
+        if (cancelled || !Number.isFinite(dur) || dur <= 0) return;
+        setDuration(dur);
+        setStartSec(0);
+        setEndSec(dur);
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          console.warn("probe_video_duration failed:", err);
+        }
+      });
     return () => {
       cancelled = true;
-      v.removeAttribute("src");
-      v.load();
     };
   }, [op, videos]);
 

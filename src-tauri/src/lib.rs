@@ -47,6 +47,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::data_dir,
             commands::ping,
+            commands::probe_video_duration,
+            commands::probe_video_dimensions,
+            commands::logo_remover_run,
+            commands::logo_remover_cancel,
             commands::get_settings,
             commands::setup_status,
             commands::download_whisper,
