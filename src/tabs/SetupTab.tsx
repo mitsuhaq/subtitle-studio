@@ -4,8 +4,9 @@ import { ProgressBar } from "../components/ProgressBar";
 import { PixelSpinner } from "../components/PixelSpinner";
 import { UpdaterCard } from "../components/UpdaterCard";
 import { ExtraComponentCard } from "../components/ExtraComponentCard";
-import { listExtras } from "../lib/tauri";
-import type { ExtraComponentDef } from "../lib/tauri";
+import { PythonExtraCard } from "../components/PythonExtraCard";
+import { listExtras, listPythonExtras } from "../lib/tauri";
+import type { ExtraComponentDef, PythonExtraDef } from "../lib/tauri";
 import {
   PixelCheck,
   PixelCircle,
@@ -33,10 +34,14 @@ export default function SetupTab() {
   const setup = useSetup();
   const { status } = setup;
   const [extras, setExtras] = useState<ExtraComponentDef[]>([]);
+  const [pyExtras, setPyExtras] = useState<PythonExtraDef[]>([]);
   useEffect(() => {
     listExtras()
       .then(setExtras)
       .catch(() => setExtras([]));
+    listPythonExtras()
+      .then(setPyExtras)
+      .catch(() => setPyExtras([]));
   }, []);
 
   return (
@@ -105,6 +110,17 @@ export default function SetupTab() {
           </div>
           {extras.map((e) => (
             <ExtraComponentCard key={e.id} def={e} />
+          ))}
+        </>
+      )}
+
+      {pyExtras.length > 0 && (
+        <>
+          <div className="mt-2 text-xs text-zinc-500 uppercase tracking-wide">
+            Тяжёлые модели (Python)
+          </div>
+          {pyExtras.map((e) => (
+            <PythonExtraCard key={e.id} def={e} />
           ))}
         </>
       )}

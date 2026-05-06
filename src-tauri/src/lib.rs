@@ -8,13 +8,43 @@ mod queue;
 mod settings;
 mod srt_io;
 mod setup;
+mod setup_venv;
 mod sidecar;
 
 use tauri::Manager;
 
+/// Pin TMPDIR to a directory on the same filesystem as the executable so
+/// the in-app updater can `rename()` the freshly downloaded `.app` over the
+/// installed one without tripping `EXDEV` (Cross-device link, OS error 18).
+///
+/// Reproducer: `.app` lives on an external SSD, system tempdir is on the
+/// internal disk → `tempfile::NamedTempFile::persist()` (called by
+/// `tauri_plugin_updater` to swap the bundle in place) fails with EXDEV
+/// because rename can't cross filesystem boundaries.
+fn pin_tmpdir_near_exe() {
+    let Ok(exe) = std::env::current_exe() else { return };
+    // For a Mac .app the layout is `…/Foo.app/Contents/MacOS/foo`.
+    // Walk up to the directory that *contains* the .app so the temp dir
+    // sits beside the bundle (and on the same volume) rather than inside
+    // the bundle's signed contents.
+    let target_parent = exe
+        .ancestors()
+        .find(|p| {
+            p.extension().map(|e| e == "app").unwrap_or(false)
+        })
+        .and_then(|app| app.parent())
+        .or_else(|| exe.parent());
+    let Some(parent) = target_parent else { return };
+    let tmpdir = parent.join(".zonthor_updater_tmp");
+    if std::fs::create_dir_all(&tmpdir).is_ok() {
+        std::env::set_var("TMPDIR", &tmpdir);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    pin_tmpdir_near_exe();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -51,6 +81,14 @@ pub fn run() {
             commands::probe_video_dimensions,
             commands::logo_remover_run,
             commands::logo_remover_cancel,
+            commands::vocal_split_run,
+            commands::vocal_split_demucs_run,
+            commands::vocal_split_cancel,
+            commands::list_python_extras,
+            commands::python_extra_status,
+            commands::install_python_extra,
+            commands::cancel_python_extra,
+            commands::uninstall_python_extra,
             commands::get_settings,
             commands::setup_status,
             commands::download_whisper,
@@ -60,6 +98,7 @@ pub fn run() {
             commands::extra_status,
             commands::download_extra,
             commands::cancel_extra,
+            commands::uninstall_extra,
             commands::chroma_key_run,
             commands::chroma_key_cancel,
             commands::audio_fix_run,

@@ -13,6 +13,7 @@ import {
   PixelMic,
   PixelScissors,
   PixelToolbox,
+  PixelWave,
 } from "../components/icons";
 import type { IconProps } from "../components/icons";
 
@@ -21,6 +22,7 @@ export type ModuleId =
   | "corridor_key"
   | "rotobrush"
   | "audio_fix"
+  | "vocal_split"
   | "logo_remover"
   | "utils";
 
@@ -65,6 +67,13 @@ export const MODULES: ModuleDef[] = [
     requires: ["DeepFilterNet"],
   },
   {
+    id: "vocal_split",
+    name: "Голос / музыка",
+    tagline: "Вытащить вокал или сделать минусовку.",
+    icon: PixelWave,
+    requires: [],
+  },
+  {
     id: "logo_remover",
     name: "Удалить логотип",
     tagline: "Скрыть водяной знак или статичный логотип.",
@@ -101,6 +110,8 @@ export function ModulesProvider({ children }: { children: ReactNode }) {
     corridor_key: false,
     rotobrush: false,
     audio_fix: false,
+    // Vocal Split: pure FFmpeg pan filter, no model needed.
+    vocal_split: true,
     // Logo Remover: pure FFmpeg `delogo` filter, no model needed.
     logo_remover: true,
     // Utils: pure FFmpeg, always available.

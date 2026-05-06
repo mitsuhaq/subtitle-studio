@@ -9,6 +9,7 @@ use crate::pipeline::{self, SubtitleStyle, TranscribeOptions, TranscribeResult};
 use crate::presets::{self, Preset};
 use crate::settings::{Settings, SettingsStore};
 use crate::setup::{self, ComponentStatus, DownloadFlags, ExtraComponentDef, SetupStatus};
+use crate::setup_venv::{self, PythonExtraDef, PythonExtraStatus};
 use crate::sidecar::SidecarState;
 use crate::srt_io::{self, SrtCue};
 
@@ -130,6 +131,59 @@ pub async fn download_extra<R: Runtime>(
 pub fn cancel_extra(id: String, flags: State<'_, DownloadFlags>) -> Result<(), String> {
     flags.extra(&id).store(true, Ordering::SeqCst);
     Ok(())
+}
+
+#[tauri::command]
+pub async fn uninstall_extra<R: Runtime>(
+    app: AppHandle<R>,
+    id: String,
+) -> Result<(), String> {
+    setup::uninstall_extra(&app, &id)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+// ---------------------------------------------------------------------------
+// Python-venv extras (Demucs, …) — heavier setup flow that creates a venv
+// and pip-installs ML libraries. Mirrors the file-extras commands above.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn list_python_extras() -> Vec<PythonExtraDef> {
+    setup_venv::PYTHON_EXTRAS.to_vec()
+}
+
+#[tauri::command]
+pub async fn python_extra_status(id: String) -> PythonExtraStatus {
+    setup_venv::python_extra_status(&id).await
+}
+
+#[tauri::command]
+pub async fn install_python_extra<R: Runtime>(
+    app: AppHandle<R>,
+    flags: State<'_, DownloadFlags>,
+    id: String,
+) -> Result<PythonExtraStatus, String> {
+    let cancel = flags.extra(&id);
+    setup_venv::install_python_extra(app, cancel, id)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub fn cancel_python_extra(id: String, flags: State<'_, DownloadFlags>) -> Result<(), String> {
+    flags.extra(&id).store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn uninstall_python_extra<R: Runtime>(
+    app: AppHandle<R>,
+    id: String,
+) -> Result<(), String> {
+    setup_venv::uninstall_python_extra(&app, &id)
+        .await
+        .map_err(|e| format!("{e:#}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -468,31 +522,10 @@ pub struct AudioFixOptions {
     /// Ambient gain in dB (typical -30..-10). Ignored if no ambient source.
     #[serde(default = "default_ambient_db")]
     pub ambient_level_db: f32,
-
-    /// Bundled IR preset id for room reverb ("studio" / "stage" / "hall" /
-    /// "cathedral"). `None` = no reverb.
-    #[serde(default)]
-    pub room_preset: Option<String>,
-    /// Wet/dry mix in percent (0 = bypass, 100 = full reverb). 25-40 is
-    /// usually pleasant for speech.
-    #[serde(default = "default_room_wet")]
-    pub room_wet_pct: f32,
-
-    /// Vocal isolation via mid/side processing. None = passthrough,
-    /// "extract" = collapse to the center channel (vocal + anything panned
-    /// dead-center), "remove" = subtract the center for a karaoke mix.
-    /// Works on radio-style stereo mixes; songs with hard-panned vocals or
-    /// stereo doubling won't separate cleanly — that's the trade-off of
-    /// skipping a neural-network demixer.
-    #[serde(default)]
-    pub vocal_mode: Option<String>,
 }
 
 fn default_ambient_db() -> f32 {
     -20.0
-}
-fn default_room_wet() -> f32 {
-    30.0
 }
 
 #[derive(serde::Serialize)]
@@ -568,47 +601,10 @@ pub async fn audio_fix_run<R: Runtime>(
         extra_inputs.len()
     });
 
-    let room_path = if let Some(preset) = options.room_preset.as_deref() {
-        let p = resource_dir
-            .join("assets")
-            .join("ir")
-            .join(format!("{preset}.wav"));
-        if !p.exists() {
-            return Err(format!("Room-пресет '{preset}' не найден в бандле"));
-        }
-        Some(p)
-    } else {
-        None
-    };
-    let room_input_idx = room_path.as_ref().map(|p| {
-        extra_inputs.push(p.clone());
-        extra_inputs.len()
-    });
-
     // ---- Build the filter graph -----------------------------------------
     // The cheap path (no ambient, no room) stays on the simple `-af` chain;
     // anything with extra inputs goes through `-filter_complex`.
     let mut chain: Vec<String> = Vec::new();
-
-    // Vocal-isolation goes *first*. After mid/side the channel layout is
-    // mono (extract) or stays stereo (remove); subsequent filters all
-    // accept either, so order doesn't matter beyond that — but doing this
-    // up front keeps the karaoke output clean of denoiser artefacts that
-    // would otherwise be amplified when we cancel the center channel.
-    match options.vocal_mode.as_deref() {
-        Some("extract") => {
-            // Sum L+R into a mono center, then high-pass at 80 Hz to drop
-            // the bass rumble that was usually mixed mono *anyway* and
-            // would otherwise dominate the isolated vocal.
-            chain.push("pan=mono|c0=0.5*c0+0.5*c1,highpass=f=80".into());
-        }
-        Some("remove") => {
-            // Classic karaoke trick: invert one side of the stereo image
-            // against the other so anything dead-center cancels out.
-            chain.push("pan=stereo|c0=c0-c1|c1=c1-c0".into());
-        }
-        _ => {}
-    }
 
     if options.denoise {
         let model = setup::extra_dest("rnnoise_model").ok_or_else(|| {
@@ -634,15 +630,7 @@ pub async fn audio_fix_run<R: Runtime>(
         chain.push(format!("volume={gain:.2}dB"));
     }
 
-    let vocal_active = matches!(
-        options.vocal_mode.as_deref(),
-        Some("extract") | Some("remove")
-    );
-    let any_op = options.denoise
-        || options.loudnorm
-        || ambient_input_idx.is_some()
-        || room_input_idx.is_some()
-        || vocal_active;
+    let any_op = options.denoise || options.loudnorm || ambient_input_idx.is_some();
     if !any_op {
         return Err("Включите хотя бы одну операцию.".to_string());
     }
@@ -727,35 +715,82 @@ pub async fn audio_fix_run<R: Runtime>(
         };
         graph.push(format!("[0:a]{dialogue_chain}[a0]"));
 
-        // Stage B+C — ambient mix. amix=duration=first keeps the dialogue
-        // length authoritative even though the ambient is looped longer.
+        // Stage B+C — ambient mix with seamless inner-crossfade loop.
+        //
+        // Plain `aloop` glues the file's last sample next to its first —
+        // audible click every cycle. The previous fix (two phase-shifted
+        // streams) avoided the click but doubled the perceived loudness
+        // because the two correlated streams stacked constructively.
+        //
+        // The right idea is to bake the loop point into a *single* stream:
+        //   * Cut the head (first FADE seconds) and the tail (last FADE
+        //     seconds) off the ambient.
+        //   * Crossfade the original tail into the original head — that
+        //     becomes the new "bridge" segment.
+        //   * Concatenate the middle + the bridge into one loop-friendly
+        //     buffer, then aloop that.
+        // When the loop wraps, the fade-out tail naturally continues into
+        // the fade-in head — no discontinuity, single-stream amplitude.
         let mut last_label = "a0".to_string();
         if let Some(idx) = ambient_input_idx {
             let amb_db = options.ambient_level_db.clamp(-50.0, 6.0);
-            // aloop with size in samples — pick a value larger than any
-            // sane video (1e9 samples ≈ 6 hours at 48 kHz).
-            graph.push(format!(
-                "[{idx}:a]aloop=loop=-1:size=999999999,atrim=0:{dur_s},asetpts=N/SR/TB,volume={amb_db:.2}dB[amb]"
-            ));
+
+            let amb_path = ambient_path.as_ref().unwrap();
+            let amb_dur = crate::preview::probe_duration_public(&ffmpeg, amb_path)
+                .await
+                .unwrap_or(30.0);
+            // Need at least ~12 s of usable material to spend 5 s on each
+            // crossfade arm and still leave a meaningful "middle". Below
+            // that, fall back to a plain aloop — no audible improvement
+            // anyway because the cycle is short enough that minor edits
+            // don't read as a "loop".
+            const FADE_S: f32 = 5.0;
+            if amb_dur >= 2.0 * FADE_S + 2.0 {
+                let mid_end = amb_dur - FADE_S; // [FADE..amb_dur-FADE]
+
+                // Three copies of the same input — splits are cheap.
+                graph.push(format!("[{idx}:a]asplit=3[ambMid][ambTail][ambHead]"));
+                // Middle: skip the fade-arm seconds on both ends.
+                graph.push(format!(
+                    "[ambMid]atrim=start={fade}:end={mid_end},asetpts=PTS-STARTPTS[ambMidT]",
+                    fade = FADE_S,
+                    mid_end = mid_end,
+                ));
+                // Tail: last FADE seconds of the original.
+                graph.push(format!(
+                    "[ambTail]atrim=start={mid_end}:end={amb_dur},asetpts=PTS-STARTPTS[ambTailT]",
+                    mid_end = mid_end,
+                    amb_dur = amb_dur,
+                ));
+                // Head: first FADE seconds of the original.
+                graph.push(format!(
+                    "[ambHead]atrim=start=0:end={fade},asetpts=PTS-STARTPTS[ambHeadT]",
+                    fade = FADE_S,
+                ));
+                // Crossfade tail→head over FADE seconds — the bridge.
+                graph.push(format!(
+                    "[ambTailT][ambHeadT]acrossfade=duration={fade}:c1=tri:c2=tri[ambBridge]",
+                    fade = FADE_S,
+                ));
+                // Stitch middle + bridge into a single loop-friendly buffer,
+                // then loop until the dialogue ends.
+                graph.push(
+                    "[ambMidT][ambBridge]concat=n=2:v=0:a=1[ambSeam]".to_string(),
+                );
+                graph.push(format!(
+                    "[ambSeam]aloop=loop=-1:size=999999999,atrim=0:{dur_s},asetpts=N/SR/TB,volume={amb_db:.2}dB[amb]"
+                ));
+            } else {
+                // Tiny ambient — just loop it raw.
+                graph.push(format!(
+                    "[{idx}:a]aloop=loop=-1:size=999999999,atrim=0:{dur_s},asetpts=N/SR/TB,volume={amb_db:.2}dB[amb]"
+                ));
+            }
+
             graph.push(format!(
                 "[{last_label}][amb]amix=inputs=2:duration=first:dropout_transition=0,volume=2.0[mix]"
             ));
             last_label = "mix".to_string();
-        }
-
-        // Stage D — convolution reverb via afir. `dry` and `wet` are the
-        // linear gains for the dry vs convolved signal (default 1.0 each).
-        // We model the wet/dry slider as a true crossfade — 0% = pure dry,
-        // 100% = pure wet — so the sum stays close to unity gain. The
-        // earlier formula (/10) was attenuating the dry signal so much that
-        // even a 30 % mix sounded like the voice had been muted.
-        if let Some(idx) = room_input_idx {
-            let wet_norm = options.room_wet_pct.clamp(0.0, 100.0) / 100.0;
-            let dry_norm = (1.0 - wet_norm).max(0.0);
-            graph.push(format!(
-                "[{last_label}][{idx}:a]afir=dry={dry_norm:.3}:wet={wet_norm:.3}:length=1:irnorm=-1[out]"
-            ));
-            last_label = "out".to_string();
         }
 
         let filter_complex = graph.join(";");
@@ -1384,6 +1419,349 @@ async fn measure_peak_dbfs(
 }
 
 // ---------------------------------------------------------------------------
+// Vocal Split module — mid/side processing via FFmpeg's `pan` filter.
+// Lives in its own module rather than crammed into Audio Fix because the
+// use case is fundamentally different: Audio Fix is "polish dialog audio",
+// vocal split is "tear vocals out of a music track for karaoke / a remix".
+// Different file in, different file out, different mental model.
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct VocalSplitResult {
+    pub output_path: PathBuf,
+}
+
+static VOCAL_SPLIT_CANCEL: once_cell::sync::Lazy<
+    std::sync::Mutex<Option<u32>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(None));
+
+#[tauri::command]
+pub fn vocal_split_cancel() {
+    if let Ok(g) = VOCAL_SPLIT_CANCEL.lock() {
+        if let Some(pid) = *g {
+            let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn vocal_split_run<R: Runtime>(
+    app: AppHandle<R>,
+    input_path: PathBuf,
+    mode: String, // "extract" | "remove"
+    settings: State<'_, SettingsStore>,
+) -> Result<VocalSplitResult, String> {
+    use tauri::Emitter;
+    use tokio::io::AsyncBufReadExt;
+
+    if !input_path.exists() {
+        return Err(format!("Файл не найден: {}", input_path.display()));
+    }
+    let snap = settings.snapshot();
+    let ffmpeg = snap
+        .ffmpeg_path
+        .clone()
+        .ok_or_else(|| "FFmpeg не установлен — Setup".to_string())?;
+
+    let (filter, suffix): (&'static str, &'static str) = match mode.as_str() {
+        "extract" => (
+            "pan=mono|c0=0.5*c0+0.5*c1,highpass=f=80",
+            "_vocal",
+        ),
+        "remove" => (
+            "pan=stereo|c0=c0-c1|c1=c1-c0",
+            "_karaoke",
+        ),
+        other => return Err(format!("Неизвестный режим: {other}")),
+    };
+
+    let stem = input_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+    let in_ext = input_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("mp4")
+        .to_ascii_lowercase();
+    let is_audio_only = matches!(
+        in_ext.as_str(),
+        "mp3" | "wav" | "m4a" | "aac" | "ogg" | "opus" | "flac" | "wma"
+    );
+    let out_ext = if is_audio_only {
+        match in_ext.as_str() {
+            "wav" => "wav",
+            "flac" => "flac",
+            "ogg" | "opus" => "opus",
+            _ => "m4a",
+        }
+    } else {
+        in_ext.as_str()
+    };
+    let out_dir = settings
+        .module_output_dir("vocal_split")
+        .or_else(|| input_path.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let _ = std::fs::create_dir_all(&out_dir);
+    let out_path = out_dir.join(format!("{stem}{suffix}.{out_ext}"));
+
+    let total_ms = crate::preview::probe_duration_public(&ffmpeg, &input_path)
+        .await
+        .map(|s| (s * 1000.0) as i64)
+        .unwrap_or(0);
+    let total = total_ms as f32 / 1000.0;
+    let _ = app.emit(
+        "vocal_split://progress",
+        serde_json::json!({ "stage": "Кодирование", "pos": 0.0, "total": total }),
+    );
+
+    let mut cmd = tokio::process::Command::new(&ffmpeg);
+    cmd.arg("-y")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-i")
+        .arg(&input_path)
+        .args(["-af", filter]);
+
+    if is_audio_only {
+        let codec_args: &[&str] = match out_ext {
+            "wav" => &["-vn", "-c:a", "pcm_s16le"],
+            "flac" => &["-vn", "-c:a", "flac"],
+            "opus" => &["-vn", "-c:a", "libopus", "-b:a", "192k"],
+            _ => &["-vn", "-c:a", "aac", "-b:a", "192k"],
+        };
+        cmd.args(codec_args);
+    } else {
+        cmd.args(["-c:v", "copy", "-c:a", "aac", "-b:a", "192k"]);
+    }
+    cmd.args(["-progress", "pipe:2"])
+        .arg(&out_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("ffmpeg spawn failed: {e}"))?;
+
+    if let Some(pid) = child.id() {
+        if let Ok(mut g) = VOCAL_SPLIT_CANCEL.lock() {
+            *g = Some(pid);
+        }
+    }
+
+    let stderr = child.stderr.take().ok_or("no stderr".to_string())?;
+    let app_progress = app.clone();
+    let progress_task = tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            if let Some(rest) = line.strip_prefix("out_time_us=") {
+                if let Ok(us) = rest.trim().parse::<i64>() {
+                    let pos = (us as f32) / 1_000_000.0;
+                    let _ = app_progress.emit(
+                        "vocal_split://progress",
+                        serde_json::json!({
+                            "stage": "Обработка",
+                            "pos": pos,
+                            "total": total,
+                        }),
+                    );
+                }
+            }
+        }
+    });
+
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    let _ = progress_task.await;
+    if let Ok(mut g) = VOCAL_SPLIT_CANCEL.lock() {
+        *g = None;
+    }
+
+    if !status.success() {
+        if status.code() == Some(255) || status.code().is_none() {
+            return Err("Прервано".to_string());
+        }
+        return Err(format!("ffmpeg exit {status}"));
+    }
+    Ok(VocalSplitResult { output_path: out_path })
+}
+
+/// Demucs-powered vocal split. Same in/out shape as `vocal_split_run` but
+/// dispatches to the Python venv installed via Setup. Up to ~10× slower
+/// than the mid/side filter, but works on tracks with hard-panned vocals
+/// where the mid/side trick fails.
+#[tauri::command]
+pub async fn vocal_split_demucs_run<R: Runtime>(
+    app: AppHandle<R>,
+    input_path: PathBuf,
+    mode: String, // "extract" | "remove"
+    settings: State<'_, SettingsStore>,
+) -> Result<VocalSplitResult, String> {
+    use tauri::Emitter;
+    use tokio::io::AsyncBufReadExt;
+
+    if !input_path.exists() {
+        return Err(format!("Файл не найден: {}", input_path.display()));
+    }
+    let py = setup_venv::venv_python("demucs");
+    if !py.exists() {
+        return Err(
+            "Demucs не установлен. Откройте Setup → раздел «Demucs» → Скачать."
+                .to_string(),
+        );
+    }
+
+    // Demucs writes outputs to a directory tree we have no use for in our
+    // UI: `<out>/htdemucs/<basename>/{vocals,no_vocals}.wav`. Generate it
+    // somewhere temporary, then move the file we actually want into the
+    // user's chosen output directory with a sensible name.
+    let scratch = std::env::temp_dir().join(format!(
+        "zonthor-demucs-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    tokio::fs::create_dir_all(&scratch)
+        .await
+        .map_err(|e| format!("temp dir: {e}"))?;
+
+    let total = crate::preview::probe_duration_public(
+        &settings.snapshot().ffmpeg_path.clone().unwrap_or_default(),
+        &input_path,
+    )
+    .await
+    .unwrap_or(0.0);
+    let _ = app.emit(
+        "vocal_split://progress",
+        serde_json::json!({ "stage": "Demucs запускается", "pos": 0.0, "total": total }),
+    );
+
+    // `--two-stems vocals` keeps demucs to a single split (vocals vs the
+    // rest), which halves the work and is exactly what the UI offers.
+    let mut cmd = tokio::process::Command::new(&py);
+    cmd.arg("-m")
+        .arg("demucs")
+        .arg("--two-stems")
+        .arg("vocals")
+        .arg("-o")
+        .arg(&scratch)
+        .arg(&input_path)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+
+    let mut child = cmd.spawn().map_err(|e| format!("demucs spawn: {e}"))?;
+
+    if let Some(pid) = child.id() {
+        if let Ok(mut g) = VOCAL_SPLIT_CANCEL.lock() {
+            *g = Some(pid);
+        }
+    }
+
+    // Demucs prints a progress bar to stderr that looks like
+    // `  6%|█▍                | 0:00:12 / 0:03:34`. Parse the percentage
+    // out of it for our progress events.
+    let stderr = child.stderr.take().ok_or("no stderr".to_string())?;
+    let app_progress = app.clone();
+    let stderr_collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let stderr_collector = stderr_collected.clone();
+    let progress_task = tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            // Cheap regex-free extraction: find "%" preceded by digits.
+            if let Some(pct_idx) = line.find('%') {
+                let head = &line[..pct_idx];
+                let digits: String = head
+                    .chars()
+                    .rev()
+                    .take_while(|c| c.is_ascii_digit() || *c == '.')
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect();
+                if let Ok(pct) = digits.parse::<f32>() {
+                    let _ = app_progress.emit(
+                        "vocal_split://progress",
+                        serde_json::json!({
+                            "stage": "Demucs",
+                            "pos": pct / 100.0 * total,
+                            "total": total,
+                        }),
+                    );
+                }
+            }
+            if let Ok(mut buf) = stderr_collector.lock() {
+                buf.push(line.clone());
+                if buf.len() > 60 {
+                    buf.remove(0);
+                }
+            }
+        }
+    });
+
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    let _ = progress_task.await;
+    if let Ok(mut g) = VOCAL_SPLIT_CANCEL.lock() {
+        *g = None;
+    }
+    if !status.success() {
+        let tail = stderr_collected
+            .lock()
+            .map(|b| b.join("\n"))
+            .unwrap_or_default();
+        let _ = tokio::fs::remove_dir_all(&scratch).await;
+        if status.code() == Some(255) || status.code().is_none() {
+            return Err("Прервано".to_string());
+        }
+        return Err(format!("demucs exit {status}\n{tail}"));
+    }
+
+    // Locate the requested stem inside the demucs output tree. The default
+    // model is `htdemucs`, so the layout is
+    // `<scratch>/htdemucs/<basename>/{vocals,no_vocals}.wav`.
+    let stem = input_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output");
+    let stem_name = if mode == "extract" {
+        "vocals"
+    } else if mode == "remove" {
+        "no_vocals"
+    } else {
+        return Err(format!("Неизвестный режим: {mode}"));
+    };
+    let demucs_out = scratch
+        .join("htdemucs")
+        .join(stem)
+        .join(format!("{stem_name}.wav"));
+    if !demucs_out.exists() {
+        let _ = tokio::fs::remove_dir_all(&scratch).await;
+        return Err(format!(
+            "demucs не записал ожидаемый файл {}",
+            demucs_out.display()
+        ));
+    }
+
+    let suffix = if mode == "extract" { "_vocal" } else { "_karaoke" };
+    let out_dir = settings
+        .module_output_dir("vocal_split")
+        .or_else(|| input_path.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let _ = std::fs::create_dir_all(&out_dir);
+    let out_path = out_dir.join(format!("{stem}{suffix}_demucs.wav"));
+    tokio::fs::rename(&demucs_out, &out_path)
+        .await
+        .or_else(|_| std::fs::copy(&demucs_out, &out_path).map(|_| ()))
+        .map_err(|e| format!("move demucs output: {e}"))?;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+
+    Ok(VocalSplitResult { output_path: out_path })
+}
+
+
+// ---------------------------------------------------------------------------
 // Logo Remover module — pure FFmpeg `delogo` filter pipeline. The user
 // drags a rectangle (or several) on a preview frame; we feed each one as a
 // `delogo=x=N:y=N:w=N:h=N` clause into a chained -vf graph. FFmpeg fills
@@ -1442,15 +1820,24 @@ pub async fn logo_remover_run<R: Runtime>(
         .clone()
         .ok_or_else(|| "FFmpeg не установлен — Setup".to_string())?;
 
-    // Sanity-check region geometry. delogo wants 1×1 minimum and refuses
-    // rectangles touching the edge of the frame, so clamp to ≥1px size and
-    // skip zero-area boxes the UI may have produced.
+    // delogo refuses rectangles that touch (or cross) the frame edge —
+    // it needs at least one pixel of context on every side to interpolate
+    // from. Clamp every region to the [1, dim-2] safe rect of the source.
+    // We ask ffmpeg what the real frame dimensions are (post-rotation)
+    // because the JS canvas could have rounded slightly past the edge,
+    // and we'd rather quietly trim than fail the whole job.
+    let (frame_w, frame_h) = crate::preview::probe_video_dimensions(&ffmpeg, &video_path)
+        .await
+        .ok_or_else(|| "Не удалось определить размер кадра".to_string())?;
     let regions: Vec<LogoRegion> = regions
         .into_iter()
-        .filter(|r| r.w >= 1 && r.h >= 1)
+        .filter_map(|r| clamp_region(r, frame_w, frame_h))
         .collect();
     if regions.is_empty() {
-        return Err("Все выделенные области пустые — нечего удалять.".to_string());
+        return Err(
+            "После корректировки границ не осталось ни одной области для удаления."
+                .to_string(),
+        );
     }
 
     let filter = regions
@@ -1458,7 +1845,7 @@ pub async fn logo_remover_run<R: Runtime>(
         .map(|r| format!("delogo=x={}:y={}:w={}:h={}", r.x, r.y, r.w, r.h))
         .collect::<Vec<_>>()
         .join(",");
-    log::info!("logo_remover vf: {filter}");
+    log::info!("logo_remover vf ({}x{}): {filter}", frame_w, frame_h);
 
     // Output: per-module override → next to source.
     let stem = video_path
@@ -1468,7 +1855,16 @@ pub async fn logo_remover_run<R: Runtime>(
     let ext = video_path
         .extension()
         .and_then(|s| s.to_str())
-        .unwrap_or("mp4");
+        .unwrap_or("mp4")
+        .to_ascii_lowercase();
+    // Stills get a different ffmpeg invocation: no audio stream to copy,
+    // no progress (one-frame encode finishes faster than the first emit).
+    // delogo itself works the same — ffmpeg treats the image as a 1-frame
+    // video and runs the filter once.
+    let is_image = matches!(
+        ext.as_str(),
+        "png" | "jpg" | "jpeg" | "webp" | "bmp"
+    );
     let out_dir = settings
         .module_output_dir("logo_remover")
         .or_else(|| video_path.parent().map(|p| p.to_path_buf()))
@@ -1476,10 +1872,14 @@ pub async fn logo_remover_run<R: Runtime>(
     let _ = std::fs::create_dir_all(&out_dir);
     let out_path = out_dir.join(format!("{stem}_clean.{ext}"));
 
-    let total_ms = crate::preview::probe_duration_public(&ffmpeg, &video_path)
-        .await
-        .map(|s| (s * 1000.0) as i64)
-        .unwrap_or(0);
+    let total_ms = if is_image {
+        0
+    } else {
+        crate::preview::probe_duration_public(&ffmpeg, &video_path)
+            .await
+            .map(|s| (s * 1000.0) as i64)
+            .unwrap_or(0)
+    };
     let total = total_ms as f32 / 1000.0;
 
     let _ = app.emit(
@@ -1487,17 +1887,27 @@ pub async fn logo_remover_run<R: Runtime>(
         serde_json::json!({ "stage": "Кодирование", "pos": 0.0, "total": total }),
     );
 
-    let mut child = tokio::process::Command::new(&ffmpeg)
-        .arg("-y")
+    let mut cmd = tokio::process::Command::new(&ffmpeg);
+    cmd.arg("-y")
         .arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")
         .arg("-i")
         .arg(&video_path)
-        .args(["-vf", &filter])
+        .args(["-vf", &filter]);
+    if is_image {
+        // Single-image output requires `-frames:v 1 -update 1`. Without
+        // them ffmpeg picks the image2 muxer and complains the output
+        // path needs a `%03d` pattern (one-frame-per-file mode), then
+        // bails with a non-zero status. Progress reporting is also
+        // skipped — encoding a single image finishes faster than the
+        // first emit would arrive anyway.
+        cmd.args(["-frames:v", "1", "-update", "1"]);
+    } else {
         // Audio passes through untouched — delogo only touches video.
-        .args(["-c:a", "copy"])
-        .args(["-progress", "pipe:2"])
+        cmd.args(["-c:a", "copy", "-progress", "pipe:2"]);
+    }
+    let mut child = cmd
         .arg(&out_path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
@@ -1513,6 +1923,8 @@ pub async fn logo_remover_run<R: Runtime>(
 
     let stderr = child.stderr.take().ok_or("no stderr".to_string())?;
     let app_progress = app.clone();
+    let stderr_collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let stderr_collector = stderr_collected.clone();
     let progress_task = tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(stderr).lines();
         while let Ok(Some(line)) = reader.next_line().await {
@@ -1528,8 +1940,18 @@ pub async fn logo_remover_run<R: Runtime>(
                         }),
                     );
                 }
-            } else if line.to_lowercase().contains("error") || line.contains("Invalid") {
-                log::warn!("[ffmpeg logo_remover] {line}");
+            } else {
+                // Keep the last few diagnostic lines so we can surface
+                // them in the error message if ffmpeg dies.
+                if let Ok(mut buf) = stderr_collector.lock() {
+                    buf.push(line.clone());
+                    if buf.len() > 30 {
+                        buf.remove(0);
+                    }
+                }
+                if line.to_lowercase().contains("error") || line.contains("Invalid") {
+                    log::warn!("[ffmpeg logo_remover] {line}");
+                }
             }
         }
     });
@@ -1544,7 +1966,11 @@ pub async fn logo_remover_run<R: Runtime>(
         if status.code() == Some(255) || status.code().is_none() {
             return Err("Прервано".to_string());
         }
-        return Err(format!("ffmpeg exit {status}"));
+        let tail = stderr_collected
+            .lock()
+            .map(|b| b.join("\n"))
+            .unwrap_or_default();
+        return Err(format!("ffmpeg exit {status}\n{tail}"));
     }
 
     let _ = app.emit(
@@ -1552,6 +1978,29 @@ pub async fn logo_remover_run<R: Runtime>(
         serde_json::json!({ "stage": "Готово", "pos": 1.0, "total": 1.0 }),
     );
     Ok(LogoResult { output_video: out_path })
+}
+
+/// Pull a region inside the safe `[1, dim-2]` rectangle and drop it if the
+/// resulting area is degenerate. delogo specifically barfs with "Logo area
+/// is outside of the frame" if any pixel touches the border.
+fn clamp_region(r: LogoRegion, w: u32, h: u32) -> Option<LogoRegion> {
+    if w < 4 || h < 4 {
+        return None;
+    }
+    let max_x = w.saturating_sub(2); // last legal x coordinate
+    let max_y = h.saturating_sub(2);
+    let x = r.x.max(1).min(max_x);
+    let y = r.y.max(1).min(max_y);
+    // After moving the corner, recompute width/height so x+rw stays
+    // strictly inside [1, w-1] (i.e. the right edge can be at most w-2).
+    let max_rw = max_x.saturating_sub(x);
+    let max_rh = max_y.saturating_sub(y);
+    let rw = r.w.min(max_rw);
+    let rh = r.h.min(max_rh);
+    if rw < 1 || rh < 1 {
+        return None;
+    }
+    Some(LogoRegion { x, y, w: rw, h: rh })
 }
 
 /// Probe video display dimensions (post-rotation). Used by Logo Remover so
@@ -1574,3 +2023,4 @@ pub async fn probe_video_dimensions(
         .await
         .ok_or_else(|| "Не удалось прочитать размер видео".to_string())
 }
+

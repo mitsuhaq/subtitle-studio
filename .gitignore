@@ -34,3 +34,4 @@ src-tauri/tauri.release.conf.json
 *.app/
 *.app
 icon-source.png
+ambient_user/

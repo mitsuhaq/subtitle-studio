@@ -16,6 +16,7 @@ import {
   notify,
   onUtilsProgress,
   pickImageFile,
+  pickMediaFile,
   pickVideoFile,
   probeVideoDuration,
   revealInShell,
@@ -30,8 +31,12 @@ import { useModuleDrop } from "../state/useModuleDrop";
 import { OutputDirCard } from "../components/OutputDirCard";
 import { TimecodePicker, formatTimecode } from "../components/TimecodePicker";
 
+const AUDIO_EXTS = ["mp3", "wav", "m4a", "aac", "ogg", "opus", "flac", "wma"];
 const isVideoPath = (p: string) =>
   VIDEO_EXTS.some((ext) => p.toLowerCase().endsWith(`.${ext}`));
+const isAudioPath = (p: string) =>
+  AUDIO_EXTS.some((ext) => p.toLowerCase().endsWith(`.${ext}`));
+const isMediaPath = (p: string) => isVideoPath(p) || isAudioPath(p);
 
 type Op = "trim" | "convert" | "overlay";
 type Phase = "idle" | "running" | "done" | "error" | "cancelled";
@@ -69,7 +74,11 @@ export default function UtilsModule() {
   const [overlayPath, setOverlayPath] = useState<string | null>(null);
 
   useModuleDrop("utils", (paths) => {
-    const dropped = paths.filter(isVideoPath);
+    // Overlay puts an image *on top of* a video — meaningless for audio.
+    // Trim and Convert work on any media stream, so they accept audio
+    // alongside video.
+    const filter = op === "overlay" ? isVideoPath : isMediaPath;
+    const dropped = paths.filter(filter);
     if (dropped.length > 0) {
       setVideos((cur) => Array.from(new Set([...cur, ...dropped])));
     }
@@ -117,7 +126,7 @@ export default function UtilsModule() {
   const elapsed = useElapsed(phase === "running");
 
   const browse = async () => {
-    const p = await pickVideoFile();
+    const p = op === "overlay" ? await pickVideoFile() : await pickMediaFile();
     if (p) setVideos((cur) => Array.from(new Set([...cur, p])));
   };
 
@@ -262,6 +271,9 @@ export default function UtilsModule() {
             <ConvertPanel
               target={targetFormat}
               onTarget={setTargetFormat}
+              audioOnlyInput={
+                videos.length > 0 && videos.every(isAudioPath)
+              }
             />
           )}
           {op === "overlay" && (
@@ -280,11 +292,23 @@ export default function UtilsModule() {
       {videos.length === 0 ? (
         <GlassCard className="border-dashed border-white/10 hover:border-gold-500/40 transition-colors">
           <div className="h-40 grid place-items-center text-zinc-500 text-sm text-center">
-            Drag &amp; drop видео сюда (можно сразу несколько)
-            <br />
-            <span className="text-zinc-600 text-[11px]">
-              .mp4 .mov .mkv .avi .webm .flv .m4v
-            </span>
+            {op === "overlay" ? (
+              <>
+                Drag &amp; drop видео сюда (можно сразу несколько)
+                <br />
+                <span className="text-zinc-600 text-[11px]">
+                  .mp4 .mov .mkv .avi .webm .flv .m4v
+                </span>
+              </>
+            ) : (
+              <>
+                Drag &amp; drop видео или аудио сюда (можно сразу несколько)
+                <br />
+                <span className="text-zinc-600 text-[11px]">
+                  видео: .mp4 .mov .mkv .webm · аудио: .mp3 .wav .m4a .aac .flac
+                </span>
+              </>
+            )}
           </div>
         </GlassCard>
       ) : (
@@ -499,9 +523,13 @@ function TrimPanel({
 function ConvertPanel({
   target,
   onTarget,
+  audioOnlyInput,
 }: {
   target: string;
   onTarget: (s: string) => void;
+  /** True when every queued source is audio-only — video targets get
+   *  disabled because there's no video stream to encode into them. */
+  audioOnlyInput: boolean;
 }) {
   const groups: Record<"video" | "audio", typeof FORMATS> = {
     video: FORMATS.filter((f) => f.group === "video"),
@@ -509,29 +537,39 @@ function ConvertPanel({
   };
   return (
     <div className="grid gap-4">
-      {(["video", "audio"] as const).map((g) => (
-        <div key={g}>
-          <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-2">
-            {g === "video" ? "Видео-форматы" : "Аудио (вырезать звук)"}
+      {(["video", "audio"] as const).map((g) => {
+        const groupDisabled = g === "video" && audioOnlyInput;
+        return (
+          <div key={g}>
+            <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-2">
+              {g === "video"
+                ? audioOnlyInput
+                  ? "Видео-форматы (нет видео-потока в исходнике)"
+                  : "Видео-форматы"
+                : "Аудио (вырезать звук)"}
+            </div>
+            <div className="flex gap-1.5 flex-wrap">
+              {groups[g].map((f) => (
+                <button
+                  key={f.value}
+                  type="button"
+                  onClick={() => !groupDisabled && onTarget(f.value)}
+                  disabled={groupDisabled}
+                  className={`px-2.5 py-1.5 rounded border text-[11px] transition-colors ${
+                    target === f.value
+                      ? "border-gold-500/60 bg-gold-500/15 text-gold-200"
+                      : groupDisabled
+                        ? "border-white/[0.04] bg-white/[0.01] text-zinc-600 cursor-not-allowed"
+                        : "border-white/10 bg-white/[0.02] text-zinc-300 hover:border-gold-500/30"
+                  }`}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
           </div>
-          <div className="flex gap-1.5 flex-wrap">
-            {groups[g].map((f) => (
-              <button
-                key={f.value}
-                type="button"
-                onClick={() => onTarget(f.value)}
-                className={`px-2.5 py-1.5 rounded border text-[11px] transition-colors ${
-                  target === f.value
-                    ? "border-gold-500/60 bg-gold-500/15 text-gold-200"
-                    : "border-white/10 bg-white/[0.02] text-zinc-300 hover:border-gold-500/30"
-                }`}
-              >
-                {f.label}
-              </button>
-            ))}
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

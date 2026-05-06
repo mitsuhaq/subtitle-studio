@@ -95,6 +95,8 @@ export const downloadExtra = (id: string) =>
   invoke<ComponentStatusInfo>("download_extra", { id });
 export const cancelExtra = (id: string) =>
   invoke<void>("cancel_extra", { id });
+export const uninstallExtra = (id: string) =>
+  invoke<void>("uninstall_extra", { id });
 
 // ---------------------------------------------------------------------------
 // CorridorKey (chroma key)
@@ -131,21 +133,15 @@ export const chromaKeyCancel = () => invoke<void>("chroma_key_cancel");
 // ---------------------------------------------------------------------------
 
 export type AmbientPreset =
-  | "room_tone"
-  | "pink_room"
-  | "white_air"
-  | "ac_hum"
-  | "distant_rumble"
-  | "wind_mic"
-  | "hall_crowd"
-  | "museum_crowd"
-  | "street";
+  | "empty_room"
+  | "computer_fans"
+  | "refrigirator_humming"
+  | "hall_ambient"
+  | "people_museum"
+  | "park_birds"
+  | "street"
+  | "wind";
 
-export type RoomPreset = "studio" | "stage" | "hall" | "cathedral";
-
-/// `extract` keeps the vocal (mid channel), `remove` cancels it (karaoke).
-/// Quality depends on how center-mixed the vocal was in the source.
-export type VocalMode = "extract" | "remove";
 
 export interface AudioFixOptions {
   denoise: boolean;
@@ -160,13 +156,6 @@ export interface AudioFixOptions {
   /** Ambient gain in dB. Sane range -40..0. */
   ambient_level_db?: number;
 
-  /** Bundled room IR preset id, or null for none. */
-  room_preset?: RoomPreset | null;
-  /** Wet/dry mix percentage, 0..100. 0 = dry only. */
-  room_wet_pct?: number;
-
-  /** Vocal isolation via mid/side processing. */
-  vocal_mode?: VocalMode | null;
 }
 
 export interface AudioFixResult {
@@ -183,6 +172,64 @@ export const audioFixRun = (videoPath: string, options: AudioFixOptions) =>
   invoke<AudioFixResult>("audio_fix_run", { videoPath, options });
 
 export const audioFixCancel = () => invoke<void>("audio_fix_cancel");
+
+// ---------------------------------------------------------------------------
+// Vocal Split — pure FFmpeg pan filter (mid/side processing)
+// ---------------------------------------------------------------------------
+
+export type VocalSplitMode = "extract" | "remove";
+
+export interface VocalSplitResult {
+  output_path: string;
+}
+export interface VocalSplitProgress {
+  stage: string;
+  pos: number;
+  total: number;
+}
+
+export const vocalSplitRun = (inputPath: string, mode: VocalSplitMode) =>
+  invoke<VocalSplitResult>("vocal_split_run", { inputPath, mode });
+export const vocalSplitDemucsRun = (inputPath: string, mode: VocalSplitMode) =>
+  invoke<VocalSplitResult>("vocal_split_demucs_run", { inputPath, mode });
+export const vocalSplitCancel = () => invoke<void>("vocal_split_cancel");
+
+
+// ---- Python-venv extras (Demucs and friends) ------------------------------
+
+export interface PythonExtraDef {
+  id: string;
+  name: string;
+  module_ids: string[];
+  python_version: string;
+  packages: string[];
+  hint: string;
+  size_bytes_hint: number;
+  gates_modules: boolean;
+}
+export interface PythonExtraStatus {
+  installed: boolean;
+  size_bytes: number;
+  message: string | null;
+}
+
+export const listPythonExtras = () => invoke<PythonExtraDef[]>("list_python_extras");
+export const pythonExtraStatus = (id: string) =>
+  invoke<PythonExtraStatus>("python_extra_status", { id });
+export const installPythonExtra = (id: string) =>
+  invoke<PythonExtraStatus>("install_python_extra", { id });
+export const cancelPythonExtra = (id: string) =>
+  invoke<void>("cancel_python_extra", { id });
+export const uninstallPythonExtra = (id: string) =>
+  invoke<void>("uninstall_python_extra", { id });
+
+export function onVocalSplitProgress(
+  cb: (p: VocalSplitProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<VocalSplitProgress>("vocal_split://progress", (e) =>
+    cb(e.payload),
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Logo Remover — pure FFmpeg `delogo` filter
@@ -517,6 +564,25 @@ export async function pickAudioFile(): Promise<string | null> {
     directory: false,
     filters: [
       { name: "Аудио", extensions: ["mp3", "wav", "m4a", "aac", "ogg", "opus", "flac", "wma"] },
+    ],
+  });
+  if (!result) return null;
+  return Array.isArray(result) ? (result[0] ?? null) : result;
+}
+
+export const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "bmp"];
+
+/// Picker for everything Logo Remover can chew on: video frames AND
+/// stills. delogo applies to single images just fine — ffmpeg treats a
+/// PNG/JPG as a 1-frame "video" stream, runs the filter, writes back to
+/// the same image format.
+export async function pickVideoOrImageFile(): Promise<string | null> {
+  const result = await openDialog({
+    title: "Выберите видео или картинку",
+    multiple: false,
+    directory: false,
+    filters: [
+      { name: "Медиа", extensions: [...VIDEO_EXTS, ...IMAGE_EXTS] },
     ],
   });
   if (!result) return null;

@@ -13,6 +13,7 @@ import {
   downloadExtra,
   extraStatus,
   onProgress,
+  uninstallExtra,
 } from "../lib/tauri";
 import type {
   ComponentStatusInfo,
@@ -68,8 +69,23 @@ export function ExtraComponentCard({ def }: Props) {
     onProgress((p) => {
       if (p.component !== routingKey) return;
       setProgress(p);
-      if (p.stage === "Готово") setPhase("done");
-      else setPhase("running");
+      if (p.stage === "Готово") {
+        setPhase("done");
+      } else if (p.stage === "Удалено") {
+        // Re-poll the file system so the badge flips back to "missing"
+        // and the action buttons return to "Скачать". Without this we'd
+        // sit forever showing the install size of a folder we just
+        // deleted, because nothing else triggers a status refresh.
+        setPhase("idle");
+        extraStatus(def.id).then((s) => {
+          setStatus(s);
+          def.module_ids.forEach((m) =>
+            setAvailability(m as ModuleId, s.installed),
+          );
+        });
+      } else {
+        setPhase("running");
+      }
     }).then((un) => {
       if (aborted) un();
       else unlisten = un;
@@ -78,7 +94,7 @@ export function ExtraComponentCard({ def }: Props) {
       aborted = true;
       unlisten?.();
     };
-  }, [routingKey]);
+  }, [routingKey, def.id, def.module_ids, setAvailability]);
 
   const start = async () => {
     setError(null);
@@ -98,6 +114,24 @@ export function ExtraComponentCard({ def }: Props) {
 
   const stop = () => {
     cancelExtra(def.id).catch(() => {});
+  };
+
+  const remove = async () => {
+    const sizeHint = status?.size_bytes ?? def.size_bytes_hint;
+    if (!confirm(`Удалить ${def.name}? Освободится ~${formatBytes(sizeHint)}`))
+      return;
+    try {
+      await uninstallExtra(def.id);
+      const s = await extraStatus(def.id);
+      setStatus(s);
+      def.module_ids.forEach((m) =>
+        setAvailability(m as ModuleId, s.installed),
+      );
+      setPhase("idle");
+    } catch (e) {
+      setError(String(e));
+      setPhase("error");
+    }
   };
 
   const installed = !!status?.installed;
@@ -136,21 +170,26 @@ export function ExtraComponentCard({ def }: Props) {
               <PixelX size={16} />
               Отменить
             </button>
+          ) : installed ? (
+            <>
+              <button className="btn-ghost" onClick={remove}>
+                <PixelX size={16} />
+                Удалить
+              </button>
+              <button className="btn-primary" onClick={start}>
+                <PixelDownload size={16} />
+                Перезагрузить
+              </button>
+            </>
           ) : (
             <button
               className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
               onClick={start}
               disabled={!available}
-              title={
-                !available
-                  ? "Модель ещё не доступна"
-                  : installed
-                    ? "Перезагрузить"
-                    : "Скачать"
-              }
+              title={!available ? "Модель ещё не доступна" : "Скачать"}
             >
               <PixelDownload size={16} />
-              {installed ? "Перезагрузить" : "Скачать"}
+              Скачать
             </button>
           )}
         </div>

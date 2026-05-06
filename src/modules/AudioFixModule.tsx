@@ -30,8 +30,6 @@ import type {
   AudioFixOptions,
   AudioFixProgress,
   AudioFixResult,
-  RoomPreset,
-  VocalMode,
 } from "../lib/tauri";
 
 // AudioFix happily takes audio-only files too: ffmpeg copies the absent video
@@ -68,23 +66,16 @@ const PEAK_PRESETS: { label: string; value: number; hint: string }[] = [
 ];
 
 const AMBIENT_PRESETS: { id: AmbientPreset; label: string; hint: string }[] = [
-  { id: "room_tone", label: "Комната", hint: "Лёгкий гул пустой комнаты" },
-  { id: "pink_room", label: "Студия", hint: "Нейтральный розовый шум" },
-  { id: "white_air", label: "Шипение", hint: "Лёгкое воздушное шипение" },
-  { id: "ac_hum", label: "Кондиционер", hint: "Низкочастотный гул вентиляции" },
-  { id: "distant_rumble", label: "Дальний гул", hint: "Очень низкий городской фон" },
-  { id: "wind_mic", label: "Ветер в микрофон", hint: "Порывы ветра, бьющие по микрофону" },
-  { id: "hall_crowd", label: "Толпа в зале", hint: "Гомон зала с людьми" },
-  { id: "museum_crowd", label: "Толпа в музее", hint: "Тихий шепчущий гомон" },
-  { id: "street", label: "Улица", hint: "Ветер + проезжающие машины" },
+  { id: "empty_room", label: "Пустая комната", hint: "Тихий комнатный фон" },
+  { id: "computer_fans", label: "Кулеры ПК", hint: "Гудение системы охлаждения" },
+  { id: "refrigirator_humming", label: "Холодильник", hint: "Низкочастотный гул компрессора" },
+  { id: "hall_ambient", label: "Зал", hint: "Большое помещение, лёгкий гомон" },
+  { id: "people_museum", label: "Люди в музее", hint: "Тихие шаги и шёпот" },
+  { id: "park_birds", label: "Парк / птицы", hint: "Тихие птицы и ветерок" },
+  { id: "street", label: "Улица", hint: "Машины, ветер, городской фон" },
+  { id: "wind", label: "Ветер", hint: "Природный ветер" },
 ];
 
-const ROOM_PRESETS: { id: RoomPreset; label: string; hint: string }[] = [
-  { id: "studio", label: "Студия", hint: "Лёгкое затухание — ~0.3 с" },
-  { id: "stage", label: "Сцена", hint: "Средняя комната — ~0.7 с" },
-  { id: "hall", label: "Зал", hint: "Большой зал — ~1.5 с" },
-  { id: "cathedral", label: "Собор", hint: "Длинный реверб — ~2.5 с" },
-];
 
 export default function AudioFixModule() {
   return (
@@ -108,12 +99,6 @@ function AudioFixInner() {
   const [ambientCustomPath, setAmbientCustomPath] = useState<string | null>(null);
   const [ambientLevelDb, setAmbientLevelDb] = useState(-20);
 
-  // Room reverb: one of the bundled IR presets, or null = bypass.
-  const [roomPreset, setRoomPreset] = useState<RoomPreset | null>(null);
-  const [roomWetPct, setRoomWetPct] = useState(30);
-
-  // Vocal/karaoke split via ffmpeg mid/side. null = passthrough.
-  const [vocalMode, setVocalMode] = useState<VocalMode | null>(null);
 
   const [phase, setPhase] = useState<Phase>("idle");
   const [progress, setProgress] = useState<AudioFixProgress | null>(null);
@@ -143,11 +128,7 @@ function AudioFixInner() {
   const canRun =
     !!videoPath &&
     phase !== "running" &&
-    (denoise ||
-      loudnorm ||
-      ambientEnabled ||
-      roomPreset !== null ||
-      vocalMode !== null);
+    (denoise || loudnorm || ambientEnabled);
 
   const run = async () => {
     if (!videoPath) return;
@@ -162,9 +143,6 @@ function AudioFixInner() {
       ambient_preset: ambientCustomPath ? null : ambientPreset,
       ambient_custom_path: ambientCustomPath,
       ambient_level_db: ambientLevelDb,
-      room_preset: roomPreset,
-      room_wet_pct: roomWetPct,
-      vocal_mode: vocalMode,
     };
     try {
       const r = await audioFixRun(videoPath, opts);
@@ -361,14 +339,6 @@ function AudioFixInner() {
         setLevelDb={setAmbientLevelDb}
       />
 
-      <RoomCard
-        preset={roomPreset}
-        setPreset={setRoomPreset}
-        wetPct={roomWetPct}
-        setWetPct={setRoomWetPct}
-      />
-
-      <VocalCard mode={vocalMode} setMode={setVocalMode} />
 
       {phase === "running" && (
         <GlassCard>
@@ -624,133 +594,3 @@ function AmbientCard({
   );
 }
 
-function VocalCard({
-  mode,
-  setMode,
-}: {
-  mode: VocalMode | null;
-  setMode: (m: VocalMode | null) => void;
-}) {
-  const OPTIONS: { id: VocalMode; label: string; hint: string }[] = [
-    { id: "extract", label: "Вытащить вокал", hint: "Оставить только то, что в центре стерео-картины (обычно вокал)" },
-    { id: "remove", label: "Убрать вокал (караоке)", hint: "Подавить центр стерео-картины — минусовка" },
-  ];
-  return (
-    <GlassCard>
-      <div className="flex items-center justify-between mb-3">
-        <h2 className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
-          <PixelSparkles size={14} className="text-gold-300" />
-          Голос / музыка
-        </h2>
-        {mode && (
-          <button
-            type="button"
-            onClick={() => setMode(null)}
-            className="text-[11px] text-zinc-500 hover:text-zinc-200"
-          >
-            Выключить
-          </button>
-        )}
-      </div>
-      <p className="text-[11px] text-zinc-500 mb-3">
-        Простое разделение через mid/side: работает на стерео-миксах с
-        вокалом по центру (радио-стиль). На записях с жёстко спанорамированным
-        или продублированным вокалом результат будет ниже, чем у
-        нейросетевого Demucs — без 1 ГБ модели по-другому не получится.
-      </p>
-      <div className="grid grid-cols-2 gap-1.5">
-        {OPTIONS.map((opt) => (
-          <button
-            key={opt.id}
-            type="button"
-            title={opt.hint}
-            onClick={() => setMode(mode === opt.id ? null : opt.id)}
-            className={`px-2.5 py-2 rounded border text-[12px] transition-colors ${
-              mode === opt.id
-                ? "border-gold-500/60 bg-gold-500/15 text-gold-200"
-                : "border-white/10 bg-white/[0.02] text-zinc-300 hover:border-gold-500/30"
-            }`}
-          >
-            {opt.label}
-          </button>
-        ))}
-      </div>
-    </GlassCard>
-  );
-}
-
-function RoomCard({
-  preset,
-  setPreset,
-  wetPct,
-  setWetPct,
-}: {
-  preset: RoomPreset | null;
-  setPreset: (p: RoomPreset | null) => void;
-  wetPct: number;
-  setWetPct: (v: number) => void;
-}) {
-  return (
-    <GlassCard>
-      <div className="flex items-center justify-between mb-3">
-        <h2 className="text-sm font-semibold text-zinc-200 flex items-center gap-2">
-          <PixelSparkles size={14} className="text-gold-300" />
-          Реверб «комнаты»
-        </h2>
-        {preset && (
-          <button
-            type="button"
-            onClick={() => setPreset(null)}
-            className="text-[11px] text-zinc-500 hover:text-zinc-200"
-          >
-            Выключить
-          </button>
-        )}
-      </div>
-      <p className="text-[11px] text-zinc-500 mb-3">
-        Имитация акустики помещения через свёрточный реверб. Подходит когда надо
-        «вписать» сухой голос в более живой пространственный микс.
-      </p>
-
-      <div className="grid grid-cols-4 gap-1.5 mb-3">
-        {ROOM_PRESETS.map((p) => (
-          <button
-            key={p.id}
-            type="button"
-            title={p.hint}
-            onClick={() => setPreset(preset === p.id ? null : p.id)}
-            className={`px-2 py-1.5 rounded border text-[11px] transition-colors ${
-              preset === p.id
-                ? "border-gold-500/60 bg-gold-500/15 text-gold-200"
-                : "border-white/10 bg-white/[0.02] text-zinc-300 hover:border-gold-500/30"
-            }`}
-          >
-            {p.label}
-          </button>
-        ))}
-      </div>
-
-      {preset && (
-        <div className="grid gap-2">
-          <div className="flex items-center justify-between text-[11px]">
-            <span className="text-zinc-500">Сила эффекта</span>
-            <span className="text-gold-200/90 tabular-nums">{wetPct.toFixed(0)}%</span>
-          </div>
-          <input
-            type="range"
-            min={0}
-            max={100}
-            step={1}
-            value={wetPct}
-            onChange={(e) => setWetPct(Number(e.target.value))}
-            className="w-full accent-gold-500"
-          />
-          <div className="text-[10px] text-zinc-600">
-            0% — голос как был. 30% — натурально. 100% — почти один реверб
-            (для эффекта).
-          </div>
-        </div>
-      )}
-    </GlassCard>
-  );
-}

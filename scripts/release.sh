@@ -66,7 +66,7 @@ cat >"$OVERRIDE" <<EOF
     "resources": [
       "binaries/${BIN_NAME}",
       "assets/ambient/*.opus",
-      "assets/ir/*.wav"
+      "assets/uv/uv"
     ]
   }
 }

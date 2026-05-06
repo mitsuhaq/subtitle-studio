@@ -498,6 +498,27 @@ export const PixelCircle = makeIcon("Circle", [
   "................",
 ]);
 
+// Two stacked waveforms — represents pulling vocal apart from music.
+// Used by the Vocal Split module.
+export const PixelWave = makeIcon("Wave", [
+  "................",
+  "................",
+  "..#.......#.....",
+  ".###.....###....",
+  "##.##...##.##...",
+  "#...#####...##..",
+  "................",
+  "................",
+  "................",
+  "................",
+  "..##...##...##..",
+  ".####.####.####.",
+  "##..###..###..##",
+  "#....#....#....#",
+  "................",
+  "................",
+]);
+
 // Eraser-shape — angled rectangle with a "rubber" tip. Good fit for the
 // Logo Remover module since the operation is "wipe a region clean".
 export const PixelEraser = makeIcon("Eraser", [

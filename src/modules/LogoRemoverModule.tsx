@@ -16,11 +16,12 @@ import { OutputDirCard } from "../components/OutputDirCard";
 import { useModuleDrop } from "../state/useModuleDrop";
 import {
   extractPreviewFrame,
+  IMAGE_EXTS,
   logoRemoverCancel,
   logoRemoverRun,
   notify,
   onLogoRemoverProgress,
-  pickVideoFile,
+  pickVideoOrImageFile,
   probeVideoDimensions,
   revealInShell,
   VIDEO_EXTS,
@@ -29,6 +30,9 @@ import type { LogoProgress, LogoRegion, LogoResult } from "../lib/tauri";
 
 const isVideoPath = (p: string) =>
   VIDEO_EXTS.some((ext) => p.toLowerCase().endsWith(`.${ext}`));
+const isImagePath = (p: string) =>
+  IMAGE_EXTS.some((ext) => p.toLowerCase().endsWith(`.${ext}`));
+const isMediaPath = (p: string) => isVideoPath(p) || isImagePath(p);
 
 type Phase = "idle" | "running" | "done" | "error" | "cancelled";
 
@@ -59,7 +63,7 @@ export default function LogoRemoverModule() {
   const imgRef = useRef<HTMLImageElement | null>(null);
 
   useModuleDrop("logo_remover", (paths) => {
-    const v = paths.find(isVideoPath);
+    const v = paths.find(isMediaPath);
     if (v) loadVideo(v);
   });
 
@@ -85,7 +89,26 @@ export default function LogoRemoverModule() {
     setError(null);
     setPhase("idle");
 
-    // Probe dimensions (post-rotation) and grab a mid-frame in parallel.
+    if (isImagePath(path)) {
+      // Stills are their own preview — load the file directly via the
+      // tauri asset protocol and read intrinsic size off the <img>. No
+      // ffmpeg round-trip needed, and probe_video_dimensions on a JPEG
+      // returns nothing useful anyway.
+      const url = `${convertFileSrc(path)}?t=${Date.now()}`;
+      setFrameSrc(url);
+      const probe = new Image();
+      probe.onload = () => {
+        if (probe.naturalWidth > 0 && probe.naturalHeight > 0) {
+          setVideoDims({ w: probe.naturalWidth, h: probe.naturalHeight });
+        }
+      };
+      probe.onerror = () => setError("Не смог прочитать картинку");
+      probe.src = url;
+      return;
+    }
+
+    // Video path: probe dimensions (post-rotation) and grab a mid-frame
+    // in parallel.
     probeVideoDimensions(path)
       .then(([w, h]) => setVideoDims({ w, h }))
       .catch((err) => console.warn("probe dims failed:", err));
@@ -98,7 +121,7 @@ export default function LogoRemoverModule() {
   };
 
   const browse = async () => {
-    const p = await pickVideoFile();
+    const p = await pickVideoOrImageFile();
     if (p) loadVideo(p);
   };
 
@@ -252,10 +275,10 @@ export default function LogoRemoverModule() {
       {!videoPath && (
         <GlassCard className="border-dashed border-white/10 hover:border-gold-500/40 transition-colors">
           <div className="h-56 grid place-items-center text-zinc-500 text-sm text-center">
-            Drag &amp; drop видео сюда
+            Drag &amp; drop видео или картинку сюда
             <br />
             <span className="text-zinc-600 text-[11px]">
-              .mp4 .mov .mkv .avi .webm .flv .m4v
+              видео: .mp4 .mov .mkv .webm · картинки: .png .jpg .webp .bmp
             </span>
           </div>
         </GlassCard>

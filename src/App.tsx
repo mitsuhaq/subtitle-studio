@@ -12,6 +12,7 @@ import SubtitlesModule from "./modules/SubtitlesModule";
 import CorridorKeyModule from "./modules/CorridorKeyModule";
 import RotobrushModule from "./modules/RotobrushModule";
 import AudioFixModule from "./modules/AudioFixModule";
+import VocalSplitModule from "./modules/VocalSplitModule";
 import LogoRemoverModule from "./modules/LogoRemoverModule";
 import UtilsModule from "./modules/UtilsModule";
 import SetupTab from "./tabs/SetupTab";
@@ -159,6 +160,7 @@ const MODULE_BY_ID: Record<ModuleId, React.ComponentType> = {
   corridor_key: CorridorKeyModule,
   rotobrush: RotobrushModule,
   audio_fix: AudioFixModule,
+  vocal_split: VocalSplitModule,
   logo_remover: LogoRemoverModule,
   utils: UtilsModule,
 };

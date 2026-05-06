@@ -118,6 +118,24 @@ pub fn extra_dest(id: &str) -> Option<PathBuf> {
     extra_def(id).map(|e| paths::data_dir().join("models").join(id).join(e.filename))
 }
 
+/// Wipe a downloaded extra. Removes both the model file and its parent
+/// directory; idempotent if nothing's there. Used by the Setup UI's
+/// "Удалить" button so users can free disk space without uninstalling
+/// the whole app.
+///
+/// Emits a `setup://progress` event with stage="Удалено" once done, so
+/// modules listening to that channel can flip their availability state
+/// without polling.
+pub async fn uninstall_extra<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<()> {
+    let dir = paths::data_dir().join("models").join(id);
+    if dir.exists() {
+        tokio::fs::remove_dir_all(&dir).await?;
+    }
+    let component_key: &'static str = leak_str(&format!("extra:{id}"));
+    emit_stage(app, component_key, "Удалено", 0, 0);
+    Ok(())
+}
+
 pub fn extra_status(id: &str) -> ComponentStatus {
     let Some(path) = extra_dest(id) else {
         return ComponentStatus {
