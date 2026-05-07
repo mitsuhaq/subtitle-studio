@@ -244,6 +244,81 @@ class ChromaKeyRequest(BaseModel):
     mode: str = "chroma_key"  # "chroma_key" | "rotobrush"
 
 
+class AutoCropRequest(BaseModel):
+    paths: list[str]
+    out_dir: str
+
+
+class AutoCropResult(BaseModel):
+    cropped: list[str]
+
+
+@app.post("/auto-crop", response_model=AutoCropResult)
+def auto_crop_endpoint(req: AutoCropRequest) -> AutoCropResult:
+    """Trim each image to the bounding box of its actual content.
+
+    Used by the Logo Ticker so a brand mark with generous transparent (or
+    white) padding doesn't end up as a thin shape after we scale all logos
+    to a common height. Two strategies:
+
+    * If the image carries an alpha channel, ``Image.getbbox()`` already
+      finds the box of non-transparent pixels.
+    * If the image is fully opaque (typical lazy-saved JPG / PNG-RGB),
+      fall back to a luminance threshold — anything darker than near-white
+      counts as content. Works for the usual "logo on white" case; falls
+      back to no-crop for white-on-dark or chromatic-on-chromatic, which
+      is rare for stock brand assets.
+    """
+    from PIL import Image
+    import numpy as np
+
+    out_dir = Path(req.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cropped_paths: list[str] = []
+
+    for idx, p in enumerate(req.paths):
+        src = Path(p)
+        if not src.exists():
+            raise HTTPException(404, f"image not found: {p}")
+        img = Image.open(src)
+        # Move palette / 1-bit through to RGBA so getbbox sees a true
+        # alpha mask. PIL handles all three modes implicitly here.
+        if img.mode not in ("RGBA", "LA", "RGB"):
+            img = img.convert("RGBA")
+
+        bbox: tuple[int, int, int, int] | None = None
+        if img.mode in ("RGBA", "LA"):
+            bbox = img.getbbox()
+
+        if bbox is None and img.mode == "RGB":
+            arr = np.asarray(img.convert("L"))
+            mask = arr < 250  # darker than near-white → content
+            if mask.any():
+                rows = np.any(mask, axis=1)
+                cols = np.any(mask, axis=0)
+                rmin, rmax = int(np.where(rows)[0][0]), int(np.where(rows)[0][-1])
+                cmin, cmax = int(np.where(cols)[0][0]), int(np.where(cols)[0][-1])
+                bbox = (cmin, rmin, cmax + 1, rmax + 1)
+
+        if bbox is None:
+            # Image is fully empty / white. Bail out gracefully — caller
+            # will use the original.
+            cropped_paths.append(str(src))
+            continue
+
+        cropped = img.crop(bbox)
+        # Always emit RGBA PNGs — gives ffmpeg downstream a stable
+        # decode path and preserves transparency through the Logo Ticker
+        # pipeline regardless of the source format.
+        if cropped.mode != "RGBA":
+            cropped = cropped.convert("RGBA")
+        out_path = out_dir / f"crop_{idx:03d}_{src.stem}.png"
+        cropped.save(out_path, format="PNG")
+        cropped_paths.append(str(out_path))
+
+    return AutoCropResult(cropped=cropped_paths)
+
+
 @app.post("/chroma-key")
 async def chroma_key_endpoint(req: ChromaKeyRequest) -> StreamingResponse:
     if not Path(req.model_path).exists():

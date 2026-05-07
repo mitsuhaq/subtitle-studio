@@ -71,17 +71,54 @@ def _coalesce_words(words: list[Word]) -> list[Word]:
     while i < len(src):
         w = src[i]
         text = w.text.strip()
-        # <digit><.,><digit> — decimal / thousands separator
+
+        # Decimal / thousands separator. Whisper splits the same number in
+        # two equally legitimate ways depending on how the audio sounded
+        # to the model:
+        #   1. ["10", ".", "000"]   — three discrete tokens
+        #   2. ["10", ".000"]       — punctuation glued to the right side
+        #   3. ["10.", "000"]       — punctuation glued to the left side
+        # We check all three so the line-budget never sees the digits as
+        # separable units.
+        if i + 2 < len(src) and text[-1:].isdigit():
+            mid = src[i + 1].text.strip()
+            tail = src[i + 2].text.strip()
+            # Variant 1: punctuation alone in the middle token.
+            if mid in _DIGIT_GLUE and tail[:1].isdigit():
+                merged = text + mid + tail
+                out.append(Word(start=w.start, end=src[i + 2].end, text=merged))
+                i += 3
+                continue
+        if i + 1 < len(src) and text[-1:].isdigit():
+            nxt = src[i + 1].text.strip()
+            # Variant 2: punctuation glued to the right side. e.g. ".000"
+            # or ",5" — separator is the leading char, rest is digits.
+            if (
+                len(nxt) >= 2
+                and nxt[0] in _DIGIT_GLUE
+                and nxt[1:].lstrip()[:1].isdigit()
+            ):
+                # `lstrip` so "10" + ". 000" still reads as one number.
+                merged = text + nxt[0] + nxt[1:].lstrip()
+                out.append(Word(start=w.start, end=src[i + 1].end, text=merged))
+                i += 2
+                continue
         if (
-            i + 2 < len(src)
-            and text[-1:].isdigit()
-            and src[i + 1].text.strip() in _DIGIT_GLUE
-            and src[i + 2].text.strip()[:1].isdigit()
+            text
+            and len(text) >= 2
+            and text[-1] in _DIGIT_GLUE
+            and text[-2].isdigit()
+            and i + 1 < len(src)
         ):
-            merged = text + src[i + 1].text.strip() + src[i + 2].text.strip()
-            out.append(Word(start=w.start, end=src[i + 2].end, text=merged))
-            i += 3
-            continue
+            # Variant 3: punctuation glued to the left side. e.g. "10."
+            # followed by "000".
+            nxt = src[i + 1].text.strip()
+            if nxt[:1].isdigit():
+                merged = text + nxt
+                out.append(Word(start=w.start, end=src[i + 1].end, text=merged))
+                i += 2
+                continue
+
         # <digit>% — percentage
         if (
             i + 1 < len(src)

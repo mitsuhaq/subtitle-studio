@@ -519,6 +519,27 @@ export const PixelWave = makeIcon("Wave", [
   "................",
 ]);
 
+// Marquee — three small filled blocks with a longer arrow underneath,
+// reads as "items moving along a line". Used by the Logo Ticker module.
+export const PixelMarquee = makeIcon("Marquee", [
+  "................",
+  "................",
+  ".###..###..###..",
+  ".###..###..###..",
+  ".###..###..###..",
+  "................",
+  "................",
+  "................",
+  "................",
+  "....##.........#",
+  "...###.........#",
+  "..#############.",
+  "...###..........",
+  "....##..........",
+  "................",
+  "................",
+]);
+
 // Eraser-shape — angled rectangle with a "rubber" tip. Good fit for the
 // Logo Remover module since the operation is "wipe a region clean".
 export const PixelEraser = makeIcon("Eraser", [

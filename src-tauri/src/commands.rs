@@ -1762,6 +1762,346 @@ pub async fn vocal_split_demucs_run<R: Runtime>(
 
 
 // ---------------------------------------------------------------------------
+// Logo Ticker — generate a transparent .mov of logos scrolling sideways.
+// Scales every logo to a common height, glues them edge-to-edge into a
+// "strip", duplicates that strip so the loop wraps without visible seams,
+// then overlays it on a transparent canvas with `x = -mod(t*speed, strip_w)`
+// to make it slide. QuickTime + qtrle keeps the output's alpha channel.
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize, Debug, Clone)]
+#[serde(rename_all = "snake_case")]
+pub struct LogoTickerOptions {
+    pub width: u32,
+    pub height: u32,
+    pub duration: f32,
+    pub speed: f32,
+    pub padding: u32,
+    pub fps: u32,
+}
+
+#[derive(serde::Serialize)]
+pub struct LogoTickerResult {
+    pub output_path: PathBuf,
+}
+
+static LOGO_TICKER_CANCEL: once_cell::sync::Lazy<
+    std::sync::Mutex<Option<u32>>,
+> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(None));
+
+#[tauri::command]
+pub fn logo_ticker_cancel() {
+    if let Ok(g) = LOGO_TICKER_CANCEL.lock() {
+        if let Some(pid) = *g {
+            let _ = std::process::Command::new("kill").arg(pid.to_string()).status();
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn logo_ticker_run<R: Runtime>(
+    app: AppHandle<R>,
+    logos: Vec<PathBuf>,
+    options: LogoTickerOptions,
+    settings: State<'_, SettingsStore>,
+) -> Result<LogoTickerResult, String> {
+    use tauri::Emitter;
+    use tokio::io::AsyncBufReadExt;
+
+    if logos.is_empty() {
+        return Err("Не добавлено ни одного логотипа.".to_string());
+    }
+    if options.width < 16 || options.height < 16 {
+        return Err("Слишком маленький холст.".to_string());
+    }
+    if options.duration < 0.5 {
+        return Err("Длительность должна быть ≥0.5 сек.".to_string());
+    }
+    if options.speed < 1.0 {
+        return Err("Скорость должна быть ≥1 px/сек.".to_string());
+    }
+
+    for p in &logos {
+        if !p.exists() {
+            return Err(format!("Не найден файл: {}", p.display()));
+        }
+    }
+
+    let snap = settings.snapshot();
+    let ffmpeg = snap
+        .ffmpeg_path
+        .clone()
+        .ok_or_else(|| "FFmpeg не установлен — Setup".to_string())?;
+
+    // Pre-step: trim each logo to its content bbox via the sidecar.
+    // PNGs with generous transparent padding (or white-on-white margins)
+    // would otherwise scale to thin shapes once we lock everyone to the
+    // same height. The sidecar uses PIL.getbbox() for alpha images and a
+    // luminance threshold fallback for opaque ones.
+    let _ = app.emit(
+        "logo_ticker://progress",
+        serde_json::json!({ "stage": "Подготовка лого", "pos": 0.0, "total": options.duration }),
+    );
+    let logos = autocrop_logos(&app, &logos)
+        .await
+        .unwrap_or_else(|e| {
+            // Don't fail the run if auto-crop dies — fall back to the
+            // originals so the user gets *something* even with a sidecar
+            // hiccup.
+            log::warn!("logo_ticker auto-crop failed, using originals: {e}");
+            logos.clone()
+        });
+
+    // Probe each logo so we can predict the scaled width and therefore
+    // the strip width (sum of logo widths + paddings). FFmpeg's
+    // `probe_video_dimensions` works on image files too.
+    let mut scaled_widths: Vec<u32> = Vec::with_capacity(logos.len());
+    for p in &logos {
+        let (w, h) = crate::preview::probe_video_dimensions(&ffmpeg, p)
+            .await
+            .ok_or_else(|| format!("Не удалось прочитать размер {}", p.display()))?;
+        if h == 0 {
+            return Err(format!("Нулевая высота: {}", p.display()));
+        }
+        let scaled = ((w as f32) * (options.height as f32) / (h as f32)).round() as u32;
+        scaled_widths.push(scaled.max(1));
+    }
+    let strip_width: u32 = scaled_widths.iter().sum::<u32>()
+        + options.padding * (logos.len() as u32);
+    if strip_width == 0 {
+        return Err("Все логотипы пустые".to_string());
+    }
+    log::info!(
+        "logo_ticker: {} logos → strip_width={} px (canvas {}x{})",
+        logos.len(),
+        strip_width,
+        options.width,
+        options.height,
+    );
+
+    // Filter graph. Each logo enters as input #i with `-loop 1 -t <dur>`,
+    // gets scaled+padded into a fixed-height tile, then everything hstacks
+    // into a `strip`. We hstack the strip with itself once more so when
+    // the visible window crosses x=strip_width during scroll there's
+    // always real strip pixels to show on the right edge instead of
+    // transparent canvas.
+    let h = options.height;
+    let pad = options.padding;
+    let mut graph: Vec<String> = Vec::new();
+
+    for (i, _) in scaled_widths.iter().enumerate() {
+        // Pipeline per logo:
+        //   1. scale to a fixed height (-2 → even auto-width preserving aspect)
+        //   2. format=rgba, setsar=1 — defang non-square pixel-aspect
+        //      ratios and any palette/keyed transparency
+        //   3. pad to add the inter-logo gap, anchored at (0,0)
+        //
+        // We *don't* scale a second time at the end. Earlier we did,
+        // because a bug elsewhere produced mismatched heights and the
+        // belt-and-braces re-scale forced them back. The real fix
+        // turned out to be `split` before the second hstack; the
+        // re-scale here was harmful — it stretched logos horizontally
+        // into thin streaks because `iw` ended up being the wrong
+        // expression in the filter chain.
+        graph.push(format!(
+            "[{i}:v]scale=-2:{h}:flags=lanczos,format=rgba,setsar=1,pad=iw+{pad}:{h}:0:0:color=0x00000000[s{i}]",
+            i = i,
+            h = h,
+            pad = pad,
+        ));
+    }
+    let strip_inputs: String = (0..logos.len()).map(|i| format!("[s{i}]")).collect();
+    let n = logos.len();
+    graph.push(format!("{strip_inputs}hstack=inputs={n}[strip]"));
+    // Fan-out via `split` — feeding the same label `[strip]` into two
+    // hstack slots is undefined in ffmpeg's filter graph and produced the
+    // bizarre "Input 1 height 655 does not match input 0 height 120"
+    // mismatches we were chasing. `split=2` makes the duplication explicit
+    // so the second slot really sees the same dimensions as the first.
+    graph.push("[strip]split=2[stripA][stripB]".to_string());
+    graph.push("[stripA][stripB]hstack=inputs=2[loopstrip]".to_string());
+
+    let canvas_w = options.width;
+    let canvas_h = options.height;
+    let dur = options.duration;
+    let fps = options.fps.max(1);
+    graph.push(format!(
+        "color=color=0x00000000:size={canvas_w}x{canvas_h}:rate={fps}:duration={dur}[bg]"
+    ));
+
+    // overlay's expression engine evaluates `x` per-frame because we set
+    // `eval=frame`. mod(t*speed, strip_width) wraps the offset so the
+    // motion is continuous; negating it slides the strip leftward.
+    let speed = options.speed;
+    let strip_w_f = strip_width as f32;
+    graph.push(format!(
+        "[bg][loopstrip]overlay=x='-mod(t*{speed:.4}\\, {strip_w_f:.4})':y=0:format=auto:eval=frame[out]"
+    ));
+
+    let filter_complex = graph.join(";");
+    log::debug!("logo_ticker filter_complex:\n{filter_complex}");
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let out_dir = settings
+        .module_output_dir("logo_ticker")
+        .or_else(|| logos.first().and_then(|p| p.parent()).map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+    let _ = std::fs::create_dir_all(&out_dir);
+    let out_path = out_dir.join(format!("ticker_{nonce}.mov"));
+
+    let _ = app.emit(
+        "logo_ticker://progress",
+        serde_json::json!({ "stage": "Кодирование", "pos": 0.0, "total": dur }),
+    );
+
+    let mut cmd = tokio::process::Command::new(&ffmpeg);
+    cmd.arg("-y").arg("-hide_banner").arg("-loglevel").arg("error");
+    for p in &logos {
+        cmd.arg("-loop").arg("1").arg("-t").arg(format!("{dur}"));
+        cmd.arg("-i").arg(p);
+    }
+    cmd.args([
+        "-filter_complex",
+        &filter_complex,
+        "-map",
+        "[out]",
+        // ProRes 4444 is the macOS-native alpha codec — opens straight
+        // in QuickTime Player, Final Cut, Motion, Premiere, AE and
+        // DaVinci with the alpha channel preserved. qtrle worked but
+        // QuickTime Player on recent macOS sometimes refuses to play
+        // it, which made handing the file off feel broken. ProRes 4444
+        // costs more disk than qtrle but at this scale (a tiny ticker
+        // band) the difference is negligible.
+        "-c:v",
+        "prores_ks",
+        "-profile:v",
+        "4444",
+        "-pix_fmt",
+        "yuva444p10le",
+        "-an",
+        "-progress",
+        "pipe:2",
+    ])
+    .arg(&out_path)
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::piped())
+    .kill_on_drop(true);
+
+    let mut child = cmd.spawn().map_err(|e| format!("ffmpeg spawn: {e}"))?;
+
+    if let Some(pid) = child.id() {
+        if let Ok(mut g) = LOGO_TICKER_CANCEL.lock() {
+            *g = Some(pid);
+        }
+    }
+
+    let stderr = child.stderr.take().ok_or("no stderr".to_string())?;
+    let app_progress = app.clone();
+    let stderr_collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let stderr_collector = stderr_collected.clone();
+    let progress_task = tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            if let Some(rest) = line.strip_prefix("out_time_us=") {
+                if let Ok(us) = rest.trim().parse::<i64>() {
+                    let pos = (us as f32) / 1_000_000.0;
+                    let _ = app_progress.emit(
+                        "logo_ticker://progress",
+                        serde_json::json!({
+                            "stage": "Сборка",
+                            "pos": pos,
+                            "total": dur,
+                        }),
+                    );
+                }
+            } else if let Ok(mut buf) = stderr_collector.lock() {
+                buf.push(line);
+                if buf.len() > 40 {
+                    buf.remove(0);
+                }
+            }
+        }
+    });
+
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    let _ = progress_task.await;
+    if let Ok(mut g) = LOGO_TICKER_CANCEL.lock() {
+        *g = None;
+    }
+    if !status.success() {
+        let tail = stderr_collected
+            .lock()
+            .map(|b| b.join("\n"))
+            .unwrap_or_default();
+        if status.code() == Some(255) || status.code().is_none() {
+            return Err("Прервано".to_string());
+        }
+        return Err(format!("ffmpeg exit {status}\n{tail}"));
+    }
+
+    let _ = app.emit(
+        "logo_ticker://progress",
+        serde_json::json!({ "stage": "Готово", "pos": dur, "total": dur }),
+    );
+    Ok(LogoTickerResult { output_path: out_path })
+}
+
+/// Trim each logo to its content bounding box via the Python sidecar's
+/// `/auto-crop` endpoint. Returns paths to PNG copies in the temp dir;
+/// callers should treat these as the new originals and not worry about
+/// cleanup (OS-level temp eviction handles it).
+async fn autocrop_logos<R: Runtime>(
+    app: &AppHandle<R>,
+    logos: &[PathBuf],
+) -> Result<Vec<PathBuf>, String> {
+    use tauri::Manager;
+    let port = app
+        .state::<SidecarState>()
+        .info
+        .lock()
+        .as_ref()
+        .map(|i| i.port)
+        .ok_or_else(|| "sidecar не запущен".to_string())?;
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let out_dir = std::env::temp_dir().join(format!("zonthor-ticker-crop-{nonce}"));
+    let _ = std::fs::create_dir_all(&out_dir);
+
+    let body = serde_json::json!({
+        "paths": logos.iter().map(|p| p.to_string_lossy()).collect::<Vec<_>>(),
+        "out_dir": out_dir.to_string_lossy(),
+    });
+    let url = format!("http://127.0.0.1:{port}/auto-crop");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("sidecar /auto-crop недоступен: {e}"))?;
+    if !resp.status().is_success() {
+        let st = resp.status();
+        let txt = resp.text().await.unwrap_or_default();
+        return Err(format!("sidecar /auto-crop → {st}: {txt}"));
+    }
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        cropped: Vec<String>,
+    }
+    let parsed: Resp = resp.json().await.map_err(|e| format!("parse: {e}"))?;
+    Ok(parsed.cropped.into_iter().map(PathBuf::from).collect())
+}
+
+// ---------------------------------------------------------------------------
 // Logo Remover module — pure FFmpeg `delogo` filter pipeline. The user
 // drags a rectangle (or several) on a preview frame; we feed each one as a
 // `delogo=x=N:y=N:w=N:h=N` clause into a chained -vf graph. FFmpeg fills

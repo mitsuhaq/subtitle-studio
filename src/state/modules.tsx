@@ -10,6 +10,7 @@ import {
   PixelCaption,
   PixelEraser,
   PixelKey,
+  PixelMarquee,
   PixelMic,
   PixelScissors,
   PixelToolbox,
@@ -24,6 +25,7 @@ export type ModuleId =
   | "audio_fix"
   | "vocal_split"
   | "logo_remover"
+  | "logo_ticker"
   | "utils";
 
 export interface ModuleDef {
@@ -81,6 +83,13 @@ export const MODULES: ModuleDef[] = [
     requires: [],
   },
   {
+    id: "logo_ticker",
+    name: "Бегущая строка лого",
+    tagline: "Бесшовный .mov с прозрачным фоном из пачки лого.",
+    icon: PixelMarquee,
+    requires: [],
+  },
+  {
     id: "utils",
     name: "Утилиты",
     tagline: "Обрезка, перекодировка, оверлей картинки.",
@@ -114,6 +123,8 @@ export function ModulesProvider({ children }: { children: ReactNode }) {
     vocal_split: true,
     // Logo Remover: pure FFmpeg `delogo` filter, no model needed.
     logo_remover: true,
+    // Logo Ticker: pure FFmpeg overlay/scroll, no model needed.
+    logo_ticker: true,
     // Utils: pure FFmpeg, always available.
     utils: true,
   });

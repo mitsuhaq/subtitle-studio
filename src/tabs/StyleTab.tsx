@@ -28,6 +28,112 @@ import {
 } from "../lib/tauri";
 import type { Preset, SubtitleStyle } from "../lib/tauri";
 
+// Full Whisper / faster-whisper language matrix. Codes are ISO-639-1 (or
+// ISO-639-3 where Whisper deviates: jw, haw, yue). Auto-detect stays the
+// default; the picker is searchable so 99 entries don't slow anyone down.
+const WHISPER_LANGUAGES: { code: string; label: string }[] = [
+  { code: "ru", label: "Русский" },
+  { code: "uk", label: "Українська" },
+  { code: "en", label: "English" },
+  { code: "be", label: "Беларуская" },
+  { code: "kk", label: "Қазақ" },
+  { code: "de", label: "Deutsch" },
+  { code: "fr", label: "Français" },
+  { code: "es", label: "Español" },
+  { code: "pt", label: "Português" },
+  { code: "it", label: "Italiano" },
+  { code: "nl", label: "Nederlands" },
+  { code: "pl", label: "Polski" },
+  { code: "cs", label: "Čeština" },
+  { code: "tr", label: "Türkçe" },
+  { code: "ja", label: "日本語" },
+  { code: "zh", label: "中文" },
+  { code: "ko", label: "한국어" },
+  { code: "ar", label: "العربية" },
+  { code: "he", label: "עברית" },
+  { code: "af", label: "Afrikaans" },
+  { code: "am", label: "አማርኛ — Amharic" },
+  { code: "as", label: "অসমীয়া — Assamese" },
+  { code: "az", label: "Azərbaycan" },
+  { code: "ba", label: "Башҡортса" },
+  { code: "bg", label: "Български" },
+  { code: "bn", label: "বাংলা — Bengali" },
+  { code: "bo", label: "བོད་སྐད་ — Tibetan" },
+  { code: "br", label: "Brezhoneg" },
+  { code: "bs", label: "Bosanski" },
+  { code: "ca", label: "Català" },
+  { code: "cy", label: "Cymraeg" },
+  { code: "da", label: "Dansk" },
+  { code: "el", label: "Ελληνικά" },
+  { code: "et", label: "Eesti" },
+  { code: "eu", label: "Euskara" },
+  { code: "fa", label: "فارسی" },
+  { code: "fi", label: "Suomi" },
+  { code: "fo", label: "Føroyskt" },
+  { code: "gl", label: "Galego" },
+  { code: "gu", label: "ગુજરાતી — Gujarati" },
+  { code: "ha", label: "Hausa" },
+  { code: "haw", label: "ʻŌlelo Hawaiʻi" },
+  { code: "hi", label: "हिन्दी" },
+  { code: "hr", label: "Hrvatski" },
+  { code: "ht", label: "Kreyòl ayisyen" },
+  { code: "hu", label: "Magyar" },
+  { code: "hy", label: "Հայերեն" },
+  { code: "id", label: "Bahasa Indonesia" },
+  { code: "is", label: "Íslenska" },
+  { code: "jw", label: "Basa Jawa" },
+  { code: "ka", label: "ქართული" },
+  { code: "km", label: "ខ្មែរ — Khmer" },
+  { code: "kn", label: "ಕನ್ನಡ — Kannada" },
+  { code: "la", label: "Latina" },
+  { code: "lb", label: "Lëtzebuergesch" },
+  { code: "ln", label: "Lingála" },
+  { code: "lo", label: "ລາວ — Lao" },
+  { code: "lt", label: "Lietuvių" },
+  { code: "lv", label: "Latviešu" },
+  { code: "mg", label: "Malagasy" },
+  { code: "mi", label: "Te reo Māori" },
+  { code: "mk", label: "Македонски" },
+  { code: "ml", label: "മലയാളം — Malayalam" },
+  { code: "mn", label: "Монгол" },
+  { code: "mr", label: "मराठी — Marathi" },
+  { code: "ms", label: "Bahasa Melayu" },
+  { code: "mt", label: "Malti" },
+  { code: "my", label: "မြန်မာ — Myanmar" },
+  { code: "ne", label: "नेपाली" },
+  { code: "nn", label: "Norsk nynorsk" },
+  { code: "no", label: "Norsk" },
+  { code: "oc", label: "Occitan" },
+  { code: "pa", label: "ਪੰਜਾਬੀ — Punjabi" },
+  { code: "ps", label: "پښتو — Pashto" },
+  { code: "ro", label: "Română" },
+  { code: "sa", label: "संस्कृतम् — Sanskrit" },
+  { code: "sd", label: "سنڌي — Sindhi" },
+  { code: "si", label: "සිංහල — Sinhala" },
+  { code: "sk", label: "Slovenčina" },
+  { code: "sl", label: "Slovenščina" },
+  { code: "sn", label: "ChiShona" },
+  { code: "so", label: "Soomaali" },
+  { code: "sq", label: "Shqip" },
+  { code: "sr", label: "Српски" },
+  { code: "su", label: "Basa Sunda" },
+  { code: "sv", label: "Svenska" },
+  { code: "sw", label: "Kiswahili" },
+  { code: "ta", label: "தமிழ் — Tamil" },
+  { code: "te", label: "తెలుగు — Telugu" },
+  { code: "tg", label: "Тоҷикӣ" },
+  { code: "th", label: "ไทย" },
+  { code: "tk", label: "Türkmençe" },
+  { code: "tl", label: "Tagalog" },
+  { code: "tt", label: "Татар" },
+  { code: "ur", label: "اردو" },
+  { code: "uz", label: "Oʻzbek" },
+  { code: "vi", label: "Tiếng Việt" },
+  { code: "yi", label: "ייִדיש" },
+  { code: "yo", label: "Yorùbá" },
+  { code: "yue", label: "粵語 — Cantonese" },
+];
+
 const ALIGNMENTS: { code: number; label: string; row: 0 | 1 | 2; col: 0 | 1 | 2 }[] = [
   { code: 7, label: "↖", row: 0, col: 0 },
   { code: 8, label: "↑", row: 0, col: 1 },
@@ -65,6 +171,9 @@ export default function StyleTab() {
   const [promptOpen, setPromptOpen] = useState(false);
   // Whisper transcription opts (live alongside style — not part of presets).
   const [initialPrompt, setInitialPrompt] = useState<string>("");
+  // `null` = let Whisper auto-detect from the audio. Otherwise a
+  // 2-letter ISO code that the model takes verbatim.
+  const [language, setLanguage] = useState<string | null>(null);
   const [maxCharsAuto, setMaxCharsAuto] = useState<boolean>(true);
   const [maxChars, setMaxChars] = useState<number>(42);
 
@@ -313,6 +422,7 @@ export default function StyleTab() {
       style,
       initial_prompt: initialPrompt.trim() || undefined,
       max_chars: maxChars,
+      language: language ?? undefined,
     });
   };
 
@@ -384,6 +494,29 @@ export default function StyleTab() {
           Транскрипция
         </h2>
         <div className="grid gap-3">
+          <div className="text-xs text-zinc-500 block">
+            <label className="block mb-1.5">Язык</label>
+            <Dropdown
+              value={language ?? "__auto__"}
+              onChange={(v) => setLanguage(v === "__auto__" ? null : v)}
+              searchable
+              width="w-full"
+              items={[
+                { value: "__auto__", label: "Авто (определять по звуку)" },
+                ...WHISPER_LANGUAGES.map((l) => ({
+                  value: l.code,
+                  label: l.label,
+                  hint: l.code,
+                })),
+              ]}
+            />
+            <span className="block mt-1 text-[10px] text-zinc-600">
+              Авто-режим Whisper иногда путает похожие языки (украинский ↔
+              русский). Выбери вручную если знаешь язык записи — точность
+              распознавания и пунктуации будет заметно выше.
+            </span>
+          </div>
+
           <label className="text-xs text-zinc-500 block">
             Контекст для Whisper
             <textarea

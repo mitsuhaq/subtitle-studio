@@ -81,6 +81,8 @@ pub fn run() {
             commands::probe_video_dimensions,
             commands::logo_remover_run,
             commands::logo_remover_cancel,
+            commands::logo_ticker_run,
+            commands::logo_ticker_cancel,
             commands::vocal_split_run,
             commands::vocal_split_demucs_run,
             commands::vocal_split_cancel,

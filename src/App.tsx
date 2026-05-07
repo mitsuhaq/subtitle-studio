@@ -14,6 +14,7 @@ import RotobrushModule from "./modules/RotobrushModule";
 import AudioFixModule from "./modules/AudioFixModule";
 import VocalSplitModule from "./modules/VocalSplitModule";
 import LogoRemoverModule from "./modules/LogoRemoverModule";
+import LogoTickerModule from "./modules/LogoTickerModule";
 import UtilsModule from "./modules/UtilsModule";
 import SetupTab from "./tabs/SetupTab";
 import { PixelArrowLeft, PixelWrench } from "./components/icons";
@@ -162,5 +163,6 @@ const MODULE_BY_ID: Record<ModuleId, React.ComponentType> = {
   audio_fix: AudioFixModule,
   vocal_split: VocalSplitModule,
   logo_remover: LogoRemoverModule,
+  logo_ticker: LogoTickerModule,
   utils: UtilsModule,
 };

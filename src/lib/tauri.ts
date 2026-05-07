@@ -264,6 +264,39 @@ export const probeVideoDimensions = (videoPath: string) =>
   invoke<[number, number]>("probe_video_dimensions", { videoPath });
 
 // ---------------------------------------------------------------------------
+// Logo Ticker — bouncing-strip generator, .mov with alpha
+// ---------------------------------------------------------------------------
+
+export interface LogoTickerOptions {
+  width: number;
+  height: number;
+  duration: number;
+  speed: number;
+  padding: number;
+  fps: number;
+}
+export interface LogoTickerResult {
+  output_path: string;
+}
+export interface LogoTickerProgress {
+  stage: string;
+  pos: number;
+  total: number;
+}
+
+export const logoTickerRun = (logos: string[], options: LogoTickerOptions) =>
+  invoke<LogoTickerResult>("logo_ticker_run", { logos, options });
+export const logoTickerCancel = () => invoke<void>("logo_ticker_cancel");
+
+export function onLogoTickerProgress(
+  cb: (p: LogoTickerProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<LogoTickerProgress>("logo_ticker://progress", (e) =>
+    cb(e.payload),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Utils — trim / convert / overlay (pure FFmpeg)
 // ---------------------------------------------------------------------------
 
@@ -571,6 +604,20 @@ export async function pickAudioFile(): Promise<string | null> {
 }
 
 export const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "bmp"];
+
+/// Multi-image picker — used by Logo Ticker where the user adds a batch
+/// of brand marks at once. Single-file `pickImageFile` stays around for
+/// modules that want exactly one (Utils Overlay, Logo Remover).
+export async function pickImageFiles(): Promise<string[]> {
+  const result = await openDialog({
+    title: "Выберите картинки",
+    multiple: true,
+    directory: false,
+    filters: [{ name: "Картинки", extensions: IMAGE_EXTS }],
+  });
+  if (!result) return [];
+  return Array.isArray(result) ? result : [result];
+}
 
 /// Picker for everything Logo Remover can chew on: video frames AND
 /// stills. delogo applies to single images just fine — ffmpeg treats a
